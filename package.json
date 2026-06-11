@@ -1,0 +1,29 @@
+{
+  "name": "insightful-thumbnailer",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.24.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "infra:up": "docker compose up -d --wait",
+    "infra:down": "docker compose down",
+    "infra:logs": "docker compose logs -f",
+    "topic:create": "docker exec thumbnailer-redpanda rpk topic create video-jobs -X brokers=localhost:9092 || true",
+    "scan": "pnpm --filter scanner-service start",
+    "generate": "pnpm --filter generator-service start",
+    "services": "pnpm --parallel --filter generator-service --filter scanner-service start",
+    "up": "pnpm infra:up && pnpm topic:create && pnpm services",
+    "dev": "pnpm --parallel --filter generator-service --filter scanner-service dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "type-check": "turbo type-check"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "turbo": "^2",
+    "typescript": "^5.6.0"
+  }
+}
