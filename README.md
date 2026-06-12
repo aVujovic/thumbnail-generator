@@ -281,6 +281,35 @@ backed up (lag ~90, generator trailing the scan); with **three** generators shar
 175 jobs were split (40 / 51 / 84) and the lag stayed at ~0 — the generators kept up with the scan.
 Scaling is horizontal and requires no code change.
 
+### How the work is sharded
+
+A `VideoJob` is produced with the **video path as the message key** (`JobProducer` sends
+`{ key: job.path, … }`). Kafka picks the partition from the key:
+
+```
+partition = murmur2(key) & 0x7fffffff % partitionCount
+```
+
+i.e. a hash of the path, modulo the number of partitions. This is consistent hashing / sharding, and
+the key choice is deliberate:
+
+- **Even distribution** — paths are diverse, so the hash spreads jobs roughly evenly across
+  partitions (and therefore across generators).
+- **Idempotency** — the same path always hashes to the same partition → the same generator, so a
+  re-scan or redelivery of a video is handled by the consumer that already wrote (or skipped) it.
+- **Per-key ordering** — Kafka preserves order within a partition, so all jobs for one path stay ordered.
+
+A poor key would break this — e.g. keying by `tenantId` would send a whole tenant's videos to one
+partition (one generator), defeating the balance. The path is the right shard key.
+
+Gotchas:
+
+- **Partition count is fixed up front.** Changing it re-shuffles the key→partition mapping
+  (`hash % 4` ≠ `hash % 8`), so pick it for peak generator count and leave it.
+- **`rpk topic delete` is async.** To re-create with a different partition count, wait for the topic
+  to actually disappear first, or `create` silently no-ops with `TOPIC_ALREADY_EXISTS` and you keep
+  the old partition count.
+
 > **In production this is Kubernetes.** The generator becomes a `Deployment` with `replicas: N`
 > (or an HPA that auto-scales on Kafka consumer lag), and the topic is provisioned with enough
 > partitions to match peak replica count. The local "run it N times" above is just the dev-time

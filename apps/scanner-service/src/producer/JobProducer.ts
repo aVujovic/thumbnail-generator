@@ -7,12 +7,17 @@ interface ProducerConfig {
 }
 
 /**
- * Maps a discovered video to a VideoJob and produces it onto the topic. The
- * file path is used as the message key so jobs for the same file land on the
- * same partition (per-file ordering, and even spread across partitions).
+ * Maps a discovered video to a VideoJob and produces it onto the topic.
  *
- * Thin and injectable: the consumer of this class (ScanJob) doesn't know about
- * Kafka, and this class doesn't know about walking — single responsibility.
+ * The file path is the message key, so Kafka shards by `murmur2(path) % partitions`.
+ * That gives, for free: an even spread across partitions/generators (paths are
+ * diverse), idempotency (the same video always hashes to the same partition →
+ * the same generator, which can skip an already-generated thumbnail), and
+ * per-path ordering. (Keying by e.g. tenantId would funnel a whole tenant to one
+ * partition — the path is the right shard key.)
+ *
+ * Thin and injectable: the caller doesn't know about Kafka, and this class
+ * doesn't know about walking — single responsibility.
  */
 export class JobProducer {
   private readonly kafka: KafkaConnection;
