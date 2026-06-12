@@ -36,7 +36,9 @@ async function harness(generateResult: GenerateResult | Error) {
     commitOffsets,
   };
 
-  const kafka = { consumer } as unknown as KafkaConnection;
+  const send = vi.fn().mockResolvedValue(undefined);
+  const producer = { send };
+  const kafka = { consumer, producer } as unknown as KafkaConnection;
   const logger = new FakeLogger();
 
   const generator = {
@@ -49,6 +51,7 @@ async function harness(generateResult: GenerateResult | Error) {
   const saved: ThumbnailResult[] = [];
   const resultRepository: IResultRepository = {
     save: vi.fn(async (r: ThumbnailResult) => void saved.push(r)),
+    markSynced: vi.fn(async () => null),
   };
 
   const consumerJob = new VideoJobConsumer(
@@ -57,6 +60,7 @@ async function harness(generateResult: GenerateResult | Error) {
       config: {
         topic: 'video-jobs',
         commandsTopic: 'scan-commands',
+        readyTopic: 'thumbnail-ready',
         outputRoot: '/out',
         thumbnailFormat: 'jpg',
         kafka: { consumer: { groupId: 'g' } },
@@ -70,7 +74,7 @@ async function harness(generateResult: GenerateResult | Error) {
   );
 
   await consumerJob.start();
-  return { handler, commitOffsets, generator, logger, saved, pause, resume };
+  return { handler, commitOffsets, generator, logger, saved, pause, resume, send };
 }
 
 function payload(value: Buffer | null, offset = '5'): EachMessagePayload {
@@ -171,6 +175,7 @@ describe('VideoJobConsumer result recording', () => {
       status: 'generated',
       attempts: 2,
       processedAt: 999,
+      synced: false,
     });
   });
 
@@ -228,6 +233,64 @@ describe('VideoJobConsumer result recording', () => {
     });
     await handler(payload(serializeVideoJob({ ...job, tenantId: 'tenant-1' })));
     expect(saved[0]).toMatchObject({ tenantId: 'tenant-1' });
+  });
+});
+
+describe('VideoJobConsumer thumbnail-ready emission', () => {
+  it('emits a ThumbnailReady event (keyed by videoPath) after a generated thumbnail', async () => {
+    const { handler, send } = await harness({
+      status: 'generated',
+      outputPath: '/out/data/clip.mp4.jpg',
+      attempts: 1,
+    });
+
+    await handler(payload(serializeVideoJob({ ...job, tenantId: 'tenant-1', scanId: 'scan-9' })));
+
+    expect(send).toHaveBeenCalledOnce();
+    const arg = send.mock.calls[0]![0] as { topic: string; messages: { key: string; value: Buffer }[] };
+    expect(arg.topic).toBe('thumbnail-ready');
+    expect(arg.messages[0]!.key).toBe('/data/clip.mp4');
+    expect(JSON.parse(arg.messages[0]!.value.toString())).toMatchObject({
+      videoPath: '/data/clip.mp4',
+      outputPath: '/out/data/clip.mp4.jpg',
+      format: 'jpg',
+      tenantId: 'tenant-1',
+      scanId: 'scan-9',
+      generatedAt: 999,
+    });
+  });
+
+  it('emits ThumbnailReady on a skipped thumbnail (the file already exists)', async () => {
+    const { handler, send } = await harness({
+      status: 'skipped',
+      outputPath: '/out/data/clip.mp4.jpg',
+      reason: 'exists',
+    });
+    await handler(payload(serializeVideoJob(job)));
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT emit ThumbnailReady on a failed job (nothing was produced)', async () => {
+    const { handler, send } = await harness({
+      status: 'failed',
+      outputPath: '/out/data/clip.mp4.jpg',
+      attempts: 3,
+      reason: 'boom',
+    });
+    await handler(payload(serializeVideoJob(job)));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('still commits even if announcing thumbnail-ready throws (best-effort)', async () => {
+    const { handler, send, commitOffsets } = await harness({
+      status: 'generated',
+      outputPath: '/x.jpg',
+      attempts: 1,
+    });
+    send.mockRejectedValueOnce(new Error('broker down'));
+
+    await handler(payload(serializeVideoJob(job)));
+    expect(commitOffsets).toHaveBeenCalledOnce(); // announce failure didn't block the commit
   });
 });
 

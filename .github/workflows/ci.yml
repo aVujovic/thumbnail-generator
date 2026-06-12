@@ -70,7 +70,7 @@ jobs:
       - name: Simulate deploy
         run: |
           echo "✅ Tests passed — proceeding with deploy simulation"
-          for service in orchestrator-service scanner-service generator-service; do
+          for service in orchestrator-service scanner-service generator-service sync-service; do
             echo "🚀 Deploying $service ..."
             echo "   - building image"
             echo "   - pushing to registry"

@@ -19,9 +19,10 @@ export const ConfigSchema = z
 
     OUTPUT_ROOT: z.string().min(1).default('./output'),
     THUMBNAIL_FORMAT: z.string().min(1).default('jpg'),
-    // Where per-video results are appended (JSONL). Defaults to
-    // OUTPUT_ROOT/results.jsonl when unset.
-    RESULTS_PATH: z.string().min(1).optional(),
+    // The "video DB" path (JSONL). Lives at the repo root beside tenants.json so
+    // the generator (writer) and sync-service (updater) share one store.
+    VIDEO_DB_PATH: z.string().min(1).default('../../videoDb.jsonl'),
+    TOPIC_THUMBNAIL_READY: z.string().min(1).default('thumbnail-ready'),
 
     GENERATE_CONCURRENCY: z.coerce.number().int().positive().default(4),
     GENERATE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
@@ -54,9 +55,8 @@ export const ConfigSchema = z
     // thumbnail output
     outputRoot: resolvePath(env.OUTPUT_ROOT),
     thumbnailFormat: env.THUMBNAIL_FORMAT.toLowerCase().replace(/^\./, ''),
-    resultsPath: env.RESULTS_PATH
-      ? resolvePath(env.RESULTS_PATH)
-      : `${resolvePath(env.OUTPUT_ROOT)}/results.jsonl`,
+    resultsPath: resolvePath(env.VIDEO_DB_PATH),
+    readyTopic: env.TOPIC_THUMBNAIL_READY,
 
     // generation behaviour
     concurrency: env.GENERATE_CONCURRENCY,
@@ -74,7 +74,8 @@ export const ConfigSchema = z
     kafka: {
       brokers: env.KAFKA_BROKERS.split(',').map((b) => b.trim()),
       clientId: env.KAFKA_CLIENT_ID,
-      mode: 'consumer' as const,
+      // Consumes video-jobs + scan-commands, produces thumbnail-ready events.
+      mode: 'both' as const,
       consumer: {
         groupId: env.GENERATOR_GROUP_ID,
         sessionTimeoutMs: env.KAFKA_SESSION_TIMEOUT_MS,

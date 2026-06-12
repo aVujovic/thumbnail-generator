@@ -2,6 +2,7 @@ export {
   TOPIC_VIDEO_JOBS,
   TOPIC_SCAN_COMMANDS,
   TOPIC_SCAN_EVENTS,
+  TOPIC_THUMBNAIL_READY,
 } from './topics.js';
 export {
   VideoJobSchema,
@@ -12,8 +13,15 @@ export {
 export {
   ThumbnailResultSchema,
   serializeResultLine,
+  parseResultLine,
   type ThumbnailResult,
 } from './thumbnailResult.js';
+export {
+  ThumbnailReadySchema,
+  serializeThumbnailReady,
+  parseThumbnailReady,
+  type ThumbnailReady,
+} from './thumbnailReady.js';
 export {
   SCAN_COMMAND,
   scanCommands,

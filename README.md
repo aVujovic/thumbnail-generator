@@ -2,12 +2,13 @@
 
 Scans a file system for video files and generates thumbnail preview images for them.
 
-The work is split into **three decoupled services** connected by **Redpanda** (Kafka-wire-compatible
-broker): an **orchestrator** that issues commands, a **scanner** that discovers videos on demand, and
-a **generator** that produces thumbnails. This models the real problem shape — a fast, I/O-bound scan
-feeding a slow, CPU-bound generation step — and lets the parts scale, fail, and be controlled
-independently. Nothing scans automatically: the scanner and generator are long-lived daemons that sit
-idle until the orchestrator tells them what to do.
+The work is split into **four decoupled services** connected by **Redpanda** (Kafka-wire-compatible
+broker): an **orchestrator** that issues commands, a **scanner** that discovers videos on demand, a
+**generator** that produces thumbnails, and a **sync-service** that replicates finished thumbnails to
+their destination. This models the real problem shape — a fast, I/O-bound scan feeding a slow,
+CPU-bound generation step, followed by a delivery step — and lets the parts scale, fail, and be
+controlled independently. Nothing scans automatically: the scanner, generator, and sync-service are
+long-lived daemons that sit idle until commanded / fed work.
 
 See [PLAN.md](./PLAN.md) for the full architecture rationale and design decisions.
 
@@ -16,29 +17,24 @@ See [PLAN.md](./PLAN.md) for the full architecture rationale and design decision
 ## How it works
 
 All messages flow through **Redpanda** — every service only produces to or consumes from a topic;
-no service talks to another directly. The broker is the hub in the middle, holding three topics:
+no service talks to another directly. The broker is the hub in the middle, holding four topics:
 
 ```
-   orchestrator-service        scanner-service              generator-service
-   (CLI, one-shot)             (daemon)                     (daemon)
-          │                    ▲         │                  ▲    │       │
-          │ produce            │ consume │ produce          │    │ consume
-          │ scan-commands      │ scan-   │ video-jobs       │    │ scan-commands
-          │                    │ commands│ + scan-events    │    │ (Pause/Resume)
-          │                    │         │                  │    │
-          ▼                    │         ▼                  │    ▼
-  ╔════════════════════════════╪═════════════════════════════════════════════╗
-  ║                         R E D P A N D A                                    ║
-  ║   [ scan-commands ]        [ video-jobs ]        [ scan-events ]           ║
-  ╚════════════════════════════════════════════════════▲══════════════════════╝
-                                              consume   │ video-jobs
-                                              (generator)│
-                                                         ▼
-                                              generator-service
-                                                  │
-                                          ffmpeg → thumbnail
-                                                  ▼
-                            thumbnails (mirror-tree)  +  results.jsonl
+  orchestrator        scanner-service          generator-service          sync-service
+  (CLI, one-shot)     (daemon)                 (daemon)                   (daemon)
+        │             ▲       │                ▲    │      │              ▲
+        │ produce     │ scan- │ produce        │    │ scan │ produce      │ consume
+        │ scan-cmds   │ cmds  │ video-jobs     │    │ cmds │ thumbnail-   │ thumbnail-
+        │             │       │ + scan-events  │    │      │ ready        │ ready
+        ▼             │       ▼                │    ▼      ▼              │
+  ╔═════════════════════════════════════════════════════════════════════╪═══════╗
+  ║                            R E D P A N D A                            │       ║
+  ║  [ scan-commands ]   [ video-jobs ]   [ scan-events ]   [ thumbnail-ready ]   ║
+  ╚══════════════════════════════════════════════════════════════════════════════╝
+                                              │                            │
+                                      ffmpeg → thumbnail            "video X synced"
+                                              ▼                            ▼
+                            thumbnails (mirror-tree) + videoDb.jsonl   videoDb row: synced=true
 ```
 
 Who produces and consumes each topic:
@@ -48,11 +44,13 @@ Who produces and consumes each topic:
 | `scan-commands` | orchestrator | scanner (`StartScan`/`StopScan`), generator (`Pause`/`Resume`) |
 | `video-jobs` | scanner | generator |
 | `scan-events` | scanner | orchestrator / observers |
+| `thumbnail-ready` | generator | sync-service |
 
 So a typical scan is: orchestrator **produces** `StartScan` → scanner **consumes** it, walks the
 directory, and **produces** `VideoJob`s (and `ScanStarted`/`ScanCompleted` events) → generator
-**consumes** the jobs, makes thumbnails, and writes results. No service ever calls another — Redpanda
-sits between every pair.
+**consumes** the jobs, makes thumbnails, writes a `videoDb.jsonl` row (`synced: false`), and
+**produces** a `ThumbnailReady` event → sync-service **consumes** it, replicates the thumbnail, and
+flips that row to `synced: true`. No service ever calls another — Redpanda sits between every pair.
 
 1. **orchestrator-service** is a thin CLI and the control plane. It resolves a `--tenant <id>` to a
    scan root via the tenant catalog, then publishes one command onto the `scan-commands` topic and
@@ -68,7 +66,14 @@ sits between every pair.
 4. **generator-service** is a long-lived daemon consuming `video-jobs`. For each job it runs ffmpeg to
    extract a thumbnail, with a per-job timeout (kill on hang), bounded retries with backoff, and
    idempotent skipping if the thumbnail already exists. It records the outcome (carrying the `scanId`)
-   and commits the Kafka offset. It also consumes `scan-commands` to honour `Pause`/`Resume`.
+   as a `videoDb.jsonl` row with `synced: false`, and — when a thumbnail actually exists (generated or
+   skipped) — produces a `ThumbnailReady` event for the sync-service. It also consumes `scan-commands`
+   to honour `Pause`/`Resume`. (A `failed` job produces nothing, so it emits no ready event.)
+5. **sync-service** is a long-lived daemon consuming `thumbnail-ready`. For each event it "syncs" the
+   thumbnail to its destination (a stand-in that logs `video X synced` — in production an rsync / scp /
+   S3 upload to the server that serves the previews), then flips that video's `videoDb.jsonl` row to
+   `synced: true`. Same write-ahead commit as the generator: the offset commits only after the sync +
+   DB update succeed, and re-syncing is idempotent, so a crash mid-sync just redelivers.
 
 ### Key principles
 
@@ -107,7 +112,8 @@ packages/
 apps/
 ├── orchestrator-service/ # CLI: TenantResolver + parseArgs → CommandPublisher → publishes a ScanCommand
 ├── scanner-service/      # daemon: CommandConsumer → ScanManager → FileScanner / JobProducer / EventProducer
-└── generator-service/    # daemon: VideoJobConsumer → ThumbnailGenerator → ThumbnailStore + ResultRepository
+├── generator-service/    # daemon: VideoJobConsumer → ThumbnailGenerator → ThumbnailStore + ResultRepository (videoDb)
+└── sync-service/         # daemon: ThumbnailReadyConsumer → SyncTarget (replicate) → VideoDb (mark synced)
 ```
 
 - **domain** — the two abstract dependencies from the task (`IFileSystem`,
@@ -129,35 +135,53 @@ apps/
   one at a time (FIFO queue) and is cancellable; `FileScanner` does the iterative walk, `JobProducer`
   emits `VideoJob`s, `EventProducer` emits lifecycle events.
 - **generator-service** — a daemon. `VideoJobConsumer` consumes work + control commands;
-  `ThumbnailGenerator` owns the resilient ffmpeg run; `ThumbnailStore` and `ResultRepository` own the
-  outputs.
+  `ThumbnailGenerator` owns the resilient ffmpeg run; `ThumbnailStore` writes the image and
+  `ResultRepository` writes the `videoDb.jsonl` row; on success it emits a `ThumbnailReady` event.
+- **sync-service** — a daemon. `ThumbnailReadyConsumer` consumes `thumbnail-ready`; `SyncTarget`
+  replicates the thumbnail (log-only here, rsync/S3 in production); `VideoDb` flips the row's `synced`
+  flag. Both `SyncTarget` and `VideoDb` are interfaces, so the destination and the store are swappable.
 
 ---
 
-## Results output (JSONL — the production DB equivalent)
+## The video DB (`videoDb.jsonl` — the production DB equivalent)
 
-For every processed video the generator appends one record to a results log
-(`OUTPUT_ROOT/results.jsonl` by default), in addition to writing the thumbnail image:
+There's one shared store, the **video DB**, holding one row per video — its metadata, the terminal
+generation `status`, and whether its thumbnail has been **synced**. It lives at the repo root
+(`videoDb.jsonl`, beside `tenants.json`) so two services share it: the **generator** INSERTs rows, the
+**sync-service** UPDATEs the `synced` flag.
 
 ```json
-{"scanId":"s-1","tenantId":"tenant-1","videoPath":"/data/movies/clip.mov","outputPath":"/out/tenant-1/data/movies/clip.mov.jpg","size":3422636,"discoveredAt":1781208138506,"format":"jpg","status":"generated","attempts":1,"processedAt":1781208139348}
-{"scanId":"s-1","tenantId":"tenant-1","videoPath":"/data/bad.mp4","outputPath":"/out/tenant-1/data/bad.mp4.jpg","size":262,"discoveredAt":1781208138485,"format":"jpg","status":"failed","attempts":3,"error":"exited with code 234","processedAt":1781208139037}
+{"scanId":"s-1","tenantId":"tenant-1","videoPath":"/data/clip.mov","outputPath":"/out/tenant-1/data/clip.mov.jpg","size":3422636,"discoveredAt":1781208138506,"format":"jpg","status":"generated","attempts":1,"processedAt":1781208139348,"synced":true,"syncedAt":1781208140002}
+{"scanId":"s-1","tenantId":"tenant-1","videoPath":"/data/bad.mp4","outputPath":"/out/tenant-1/data/bad.mp4.jpg","size":262,"discoveredAt":1781208138485,"format":"jpg","status":"failed","attempts":3,"error":"exited with code 234","processedAt":1781208139037,"synced":false}
 ```
 
-Each line is one record with the video's metadata, the `scanId` and `tenantId` (so results group back
-to their scan and tenant), and the terminal `status` (`generated` | `skipped` | `failed`, with the
-error reason on failure).
+Each row carries the video's metadata, the `scanId` + `tenantId` (so rows group back to their scan and
+tenant), the terminal `status` (`generated` | `skipped` | `failed`), and the **sync lifecycle**:
 
-This is deliberately behind an **`IResultRepository`** interface, with a JSONL (append-only)
-implementation. **In production this would be a Postgres/MySQL table** — `save()` models a single
-row `INSERT`, and swapping `JsonlResultRepository` for a `PostgresResultRepository` requires no
-change to the consumer, the generator, or their tests. JSONL is used here because append is atomic
-under concurrency (multiple consumers never clobber each other) and survives crashes — the same
-guarantees a row-insert gives, without standing up a database for the assessment.
+- The generator writes every row with `synced: false`.
+- For a row whose thumbnail exists (`generated` / `skipped`) it emits a `ThumbnailReady` event.
+- The sync-service consumes that event, replicates the thumbnail, and flips the row to
+  `synced: true` (stamping `syncedAt`). A `failed` row produced no thumbnail, so it's never synced.
+
+This sits behind two interfaces — **`IResultRepository`** (generator-side INSERT, `save()`) and
+**`IVideoDb`** (sync-side UPDATE, `markSynced()`) — over a JSONL implementation. **In production this
+is one Postgres/MySQL table**: `save()` is a row `INSERT`, `markSynced()` is
+`UPDATE videos SET synced=true WHERE path=?`. Swapping the JSONL classes for DB ones touches neither
+consumer nor their tests. JSONL is used here because it gives the same per-row durability without
+standing up a database for the assessment.
 
 Thumbnails themselves mirror the source tree under `OUTPUT_ROOT/<tenantId>/`
 (e.g. `/data/movies/clip.mov` for `tenant-1` → `OUTPUT_ROOT/tenant-1/data/movies/clip.mov.jpg`) so
 neither two videos nor two tenants can ever collide on the same output path.
+
+### Why a separate sync-service?
+
+Replication is its own concern with its own failure modes (network, destination down, slow transfers)
+and its own scaling needs (more sync workers when the destination is the bottleneck) — independent of
+how fast thumbnails are generated. Putting it behind its own topic means the generator never blocks on
+a slow upload, the two scale separately, and other consumers (a search indexer, a CDN warmer) can
+react to the same `ThumbnailReady` event without touching the generator. That's the whole point of the
+decoupled, event-driven shape: the producer announces a fact and is done.
 
 ---
 
@@ -184,19 +208,20 @@ orchestrator**.
 **1. Start infra + both daemons:**
 
 ```bash
-pnpm up        # infra:up + create topics + run scanner & generator daemons
+pnpm up        # infra:up + create topics + run scanner, generator & sync daemons
 ```
 
 Or step by step:
 
 ```bash
 pnpm infra:up        # start Redpanda + Console, waits until healthy
-pnpm topic:create    # create video-jobs / scan-commands / scan-events topics (idempotent)
-pnpm services        # run scanner + generator daemons (no watch)
+pnpm topic:create    # create video-jobs / scan-commands / scan-events / thumbnail-ready topics (idempotent)
+pnpm services        # run scanner + generator + sync daemons (no watch)
 ```
 
-At this point both daemons are connected and **idle** — the scanner logs `waiting for commands`, the
-generator `waiting for jobs`. Nothing is scanned until you tell it to.
+At this point all three daemons are connected and **idle** — the scanner logs `waiting for commands`,
+the generator `waiting for jobs`, the sync-service `waiting for ready thumbnails`. Nothing happens
+until you tell it to.
 
 **2. Drive the pipeline with the orchestrator** (in another terminal):
 
@@ -215,7 +240,8 @@ the scan root is a tenant configuration detail, not a CLI argument. Issue `scan:
 different tenant at any time; a scan already running is queued behind the current one (FIFO).
 
 Watch progress in the **Redpanda Console** (http://localhost:8086) or in the daemon logs. Thumbnails
-land under `OUTPUT_ROOT` (mirror-tree) and every outcome is appended to `results.jsonl`.
+land under `OUTPUT_ROOT` (mirror-tree), every outcome is written as a `videoDb.jsonl` row, and the
+sync-service logs `🔄 video synced — …` then flips that row's `synced` flag to `true`.
 
 > **Use `pnpm services` to run the daemons**, not `pnpm dev`. `pnpm dev` runs them under
 > `node --watch` for live code reload while developing; for actually running the pipeline use
@@ -244,7 +270,7 @@ What the `tenantId` buys you:
   publishes `StartScan { tenantId, scanId, scanRoot }`.
 - **Per-tenant output** — thumbnails land under `OUTPUT_ROOT/<tenantId>/…` (mirror-tree inside), so
   tenants never collide on disk.
-- **Per-tenant tracking** — every `results.jsonl` row carries the `tenantId`, so results group back
+- **Per-tenant tracking** — every `videoDb.jsonl` row carries the `tenantId`, so rows group back
   to their tenant.
 
 In production the catalog would be a database table; the path it points at would be the real
@@ -324,11 +350,12 @@ Gotchas:
 
 ```bash
 # infra + daemons
-pnpm up              # infra + topics + both daemons
-pnpm services        # scanner + generator daemons (no watch — use this to run)
+pnpm up              # infra + topics + all daemons
+pnpm services        # scanner + generator + sync daemons (no watch — use this to run)
 pnpm scan            # scanner daemon only
 pnpm generate        # generator daemon only
-pnpm dev             # both daemons in watch mode (development only)
+pnpm sync            # sync daemon only
+pnpm dev             # all daemons in watch mode (development only)
 
 # orchestration (control the running daemons)
 pnpm scan:start --tenant <id> [--id <id>]   # StartScan (path from tenants.json)
@@ -348,7 +375,7 @@ pnpm topic:create    # create the topics
 If a consumer group ever gets wedged (e.g. after killing daemons hard), reset it:
 
 ```bash
-docker exec thumbnailer-redpanda rpk group delete scanners thumbnail-generators -X brokers=localhost:9092
+docker exec thumbnailer-redpanda rpk group delete scanners thumbnail-generators thumbnail-syncers -X brokers=localhost:9092
 ```
 
 ## Configuration
@@ -360,17 +387,19 @@ readable error). See [.env.example](./.env.example) for the full list. Most-used
 |---|---|---|
 | `KAFKA_BROKERS` | all | Redpanda broker address (default `localhost:29092`) |
 | `TENANTS_FILE` | orchestrator | Path to the tenant catalog (default repo-root `tenants.json`) |
-| `SCANNER_GROUP_ID` | scanner | Consumer group for the scanner (must differ from the generator's) |
+| `SCANNER_GROUP_ID` | scanner | Consumer group for the scanner (must differ from the others') |
 | `GENERATOR_GROUP_ID` | generator | Consumer group for the generator |
+| `SYNC_GROUP_ID` | sync | Consumer group for the sync-service |
 | `VIDEO_EXTENSIONS` | scanner | Comma-separated extensions to treat as video |
 | `SCAN_MAX_DEPTH` | scanner | Max directory depth (cheap cycle guard) |
 | `OUTPUT_ROOT` | generator | Where thumbnails are written (`OUTPUT_ROOT/<tenantId>/`, mirror-tree) |
-| `RESULTS_PATH` | generator | Results JSONL path (default `OUTPUT_ROOT/results.jsonl`) |
+| `VIDEO_DB_PATH` | generator, sync | Shared video DB (JSONL) path (default repo-root `videoDb.jsonl`) |
 | `THUMBNAIL_FORMAT` | generator | Output image format (`jpg`, `png`, …) |
 | `GENERATE_CONCURRENCY` | generator | Max concurrent ffmpeg processes |
 | `GENERATE_TIMEOUT_MS` | generator | Per-job timeout before the process is killed |
 | `GENERATE_MAX_RETRIES` | generator | Retries on failure (total attempts = retries + 1) |
 | `GENERATE_FORCE` | generator | Regenerate even if a thumbnail already exists |
+| `SYNC_DELAY_MS` | sync | Simulated per-thumbnail transfer latency (ms, default 0) |
 
 ## Tests
 

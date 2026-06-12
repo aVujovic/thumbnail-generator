@@ -1,10 +1,11 @@
 import { z } from 'zod';
 
 /**
- * The outcome of processing one video — what the generator records to its
- * result sink. In production this is a row in a Postgres/MySQL table; here it's
- * one line in a JSONL file. The shape is the same either way, which is why it
- * lives in contracts (the "table schema").
+ * The status of one video — a row in the "video DB". In production this is a row
+ * in a Postgres/MySQL table; here it's one line in `videoDb.jsonl` (JSONL). The
+ * shape is the same either way, which is why it lives in contracts (the "table
+ * schema"). The generator INSERTs a row per processed video; the sync-service
+ * later UPDATEs that row's `synced` flag to true once the thumbnail is synced.
  */
 export const ThumbnailResultSchema = z.object({
   /** The scan this result belongs to (if the job carried one). */
@@ -29,6 +30,14 @@ export const ThumbnailResultSchema = z.object({
   error: z.string().optional(),
   /** Epoch millis the result was recorded. */
   processedAt: z.number().int().nonnegative(),
+  /**
+   * Whether the thumbnail has been synced to its destination by the
+   * sync-service. The generator INSERTs rows with `synced: false`; the
+   * sync-service flips it to true. Defaults to false so older rows read sanely.
+   */
+  synced: z.boolean().default(false),
+  /** Epoch millis the sync-service synced it — present once `synced` is true. */
+  syncedAt: z.number().int().nonnegative().optional(),
 });
 
 export type ThumbnailResult = z.infer<typeof ThumbnailResultSchema>;
@@ -36,4 +45,16 @@ export type ThumbnailResult = z.infer<typeof ThumbnailResultSchema>;
 /** Serialize one result as a single JSONL line (newline included). */
 export function serializeResultLine(result: ThumbnailResult): string {
   return `${JSON.stringify(result)}\n`;
+}
+
+/** Parse one JSONL line back into a result row (null on malformed/invalid). */
+export function parseResultLine(line: string): ThumbnailResult | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = ThumbnailResultSchema.safeParse(JSON.parse(trimmed));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }

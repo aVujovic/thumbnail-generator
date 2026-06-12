@@ -2,6 +2,8 @@ import {
   parseScanCommand,
   parseVideoJob,
   SCAN_COMMAND,
+  serializeThumbnailReady,
+  type ThumbnailReady,
   type ThumbnailResult,
   type VideoJob,
 } from '@thumbnailer/contracts';
@@ -109,10 +111,11 @@ export class VideoJobConsumer {
 
   /**
    * Process a single job: generate its thumbnail, record the outcome to the
-   * result repository (audit trail), and let the result decide what gets logged.
-   * All three outcomes (generated / skipped / failed) are terminal and lead to a
-   * commit by the caller — retries already happened inside the generator, so
-   * redelivering a permanently-broken video would just loop.
+   * video DB (synced:false on insert), and — when a thumbnail was actually
+   * produced — announce a ThumbnailReady event so the sync-service can pick it
+   * up. All three outcomes (generated / skipped / failed) are terminal and lead
+   * to a commit by the caller — retries already happened inside the generator,
+   * so redelivering a permanently-broken video would just loop.
    */
   async process(job: VideoJob, ctx: { partition: number; offset: string }): Promise<void> {
     const result = await this.generator.generate(job);
@@ -129,13 +132,50 @@ export class VideoJobConsumer {
       attempts: result.status === 'skipped' ? 1 : result.attempts,
       ...(result.status === 'failed' ? { error: result.reason } : {}),
       processedAt: this.now(),
+      synced: false,
     };
     await this.results.save(record);
+
+    // A thumbnail now exists on disk (freshly generated or already there) →
+    // announce it for downstream sync. 'failed' produced nothing, so it isn't
+    // ready; emitting it would have the sync-service chase a missing file.
+    if (result.status === 'generated' || result.status === 'skipped') {
+      await this.emitReady(record);
+    }
 
     if (result.status === 'failed') {
       this.logger.error(
         { path: job.path, ...ctx, reason: result.reason },
         'job failed after retries — committing to avoid a redelivery loop',
+      );
+    }
+  }
+
+  /**
+   * Publish a ThumbnailReady event. Keyed by videoPath so a video's ready-events
+   * keep partition order and shard the same way jobs do — the sync-service
+   * scales identically to the generator. Best-effort: a failed announce is
+   * logged but never blocks the commit (the row is already in the DB; the
+   * thumbnail can be reconciled later).
+   */
+  private async emitReady(record: ThumbnailResult): Promise<void> {
+    const event: ThumbnailReady = {
+      videoPath: record.videoPath,
+      outputPath: record.outputPath,
+      format: record.format,
+      ...(record.tenantId ? { tenantId: record.tenantId } : {}),
+      ...(record.scanId ? { scanId: record.scanId } : {}),
+      generatedAt: record.processedAt,
+    };
+    try {
+      await this.kafka.producer!.send({
+        topic: this.config.readyTopic,
+        messages: [{ key: event.videoPath, value: serializeThumbnailReady(event) }],
+      });
+    } catch (err) {
+      this.logger.warn(
+        { videoPath: record.videoPath, err: err instanceof Error ? err.message : String(err) },
+        'failed to announce thumbnail-ready (will not block commit)',
       );
     }
   }
