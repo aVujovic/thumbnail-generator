@@ -15,28 +15,44 @@ See [PLAN.md](./PLAN.md) for the full architecture rationale and design decision
 
 ## How it works
 
+All messages flow through **Redpanda** — every service only produces to or consumes from a topic;
+no service talks to another directly. The broker is the hub in the middle, holding three topics:
+
 ```
-                       pnpm scan:start --root ~/Movies
-                                  │
-                        ┌─────────▼──────────┐
-                        │ orchestrator-service│   (CLI: publishes one command, exits)
-                        └─────────┬──────────┘
-                                  │  topic: scan-commands
-              ┌───────────────────┼───────────────────┐
-              ▼                                        ▼
-   ┌─────────────────────┐                  ┌──────────────────────┐
-   │  scanner-service     │  topic:          │  generator-service    │
-   │  (daemon)            │  video-jobs      │  (daemon)             │
-   │                      │ ───────────────► │                      │
-   │  StartScan → walk    │                  │  pull job             │
-   │  StopScan  → cancel  │                  │  Pause/Resume         │
-   │  produce VideoJob ───┼──► scan-events   │  ffmpeg → thumbnail   │
-   │  emit ScanStarted/   │  (orchestrator   │  timeout/kill/retry   │
-   │       Completed      │   observes)      │  write result + commit│
-   └─────────────────────┘                  └──────────┬───────────┘
-                                                        │
-                                      thumbnails (mirror-tree)  +  results.jsonl
+   orchestrator-service        scanner-service              generator-service
+   (CLI, one-shot)             (daemon)                     (daemon)
+          │                    ▲         │                  ▲    │       │
+          │ produce            │ consume │ produce          │    │ consume
+          │ scan-commands      │ scan-   │ video-jobs       │    │ scan-commands
+          │                    │ commands│ + scan-events    │    │ (Pause/Resume)
+          │                    │         │                  │    │
+          ▼                    │         ▼                  │    ▼
+  ╔════════════════════════════╪═════════════════════════════════════════════╗
+  ║                         R E D P A N D A                                    ║
+  ║   [ scan-commands ]        [ video-jobs ]        [ scan-events ]           ║
+  ╚════════════════════════════════════════════════════▲══════════════════════╝
+                                              consume   │ video-jobs
+                                              (generator)│
+                                                         ▼
+                                              generator-service
+                                                  │
+                                          ffmpeg → thumbnail
+                                                  ▼
+                            thumbnails (mirror-tree)  +  results.jsonl
 ```
+
+Who produces and consumes each topic:
+
+| Topic | Produced by | Consumed by |
+|---|---|---|
+| `scan-commands` | orchestrator | scanner (`StartScan`/`StopScan`), generator (`Pause`/`Resume`) |
+| `video-jobs` | scanner | generator |
+| `scan-events` | scanner | orchestrator / observers |
+
+So a typical scan is: orchestrator **produces** `StartScan` → scanner **consumes** it, walks the
+directory, and **produces** `VideoJob`s (and `ScanStarted`/`ScanCompleted` events) → generator
+**consumes** the jobs, makes thumbnails, and writes results. No service ever calls another — Redpanda
+sits between every pair.
 
 1. **orchestrator-service** is a thin CLI. Each invocation publishes one command onto the
    `scan-commands` topic and exits: `StartScan` (with a path and a `scanId`), `StopScan`,
