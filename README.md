@@ -339,6 +339,55 @@ Gotchas:
 > partitions to match peak replica count. The local "run it N times" above is just the dev-time
 > equivalent of bumping replicas.
 
+### Horizontal scaling — every service
+
+The generator is the obvious bottleneck, but the same broker-backed model lets **every** service scale
+out. They don't all scale the *same way*, though — the unit of parallelism differs per service, and
+that difference is the interesting part:
+
+| Service | Scales by | Unit of parallelism | How |
+|---|---|---|---|
+| **generator** | consumer group on `video-jobs` | partition (one generator per partition) | run N instances; N ≤ `video-jobs` partitions (above) |
+| **sync** | consumer group on `thumbnail-ready` | partition (one syncer per partition) | identical to the generator — run N instances; N ≤ `thumbnail-ready` partitions |
+| **scanner** | tenant / scan-root sharding | a scan (one walk at a time per instance) | partition `scan-commands` by `tenantId`, or shard tenants across scanner pools |
+| **orchestrator** | — (stateless) | — | nothing to scale: it publishes one command and exits |
+
+**Generator and sync are the easy case.** Both are plain consumer-group members on a partitioned
+topic, so they scale the exact same way: add partitions to the topic, run more instances, the broker
+splits the work. To parallelise sync the same way the generator does:
+
+```bash
+# give thumbnail-ready N partitions, then run N syncers
+docker exec thumbnailer-redpanda rpk topic create thumbnail-ready -p 4 -X brokers=localhost:9092
+pnpm sync   # in N terminals / N replicas
+```
+
+Because `ThumbnailReady` is keyed by `videoPath` (same shard key as the job), a video's
+generate-then-sync work lands on a consistent partition end to end, and re-syncing is idempotent — so
+sync can scale and recover with the same guarantees as the generator.
+
+**The scanner is the different case** — worth calling out because it shows scaling isn't one-size-fits.
+A scan is a single directory walk; one walk doesn't split across partitions the way a stream of
+independent jobs does. So you don't scale the scanner by throwing more consumers at one scan — you
+scale it by **distributing tenants / scan-roots across instances**. Two ways:
+
+- **Partition `scan-commands` by `tenantId`.** Each scanner in the group owns a subset of tenants, so
+  `tenant-1`'s scan and `tenant-2`'s scan run on different instances concurrently. (The orchestrator
+  already carries `tenantId` on every command — it would just become the message key.)
+- **Separate scanner pools per tenant tier.** A heavy tenant (millions of files) gets its own scanner
+  deployment with its own `SCANNER_GROUP_ID`, isolated from smaller tenants — so one giant scan never
+  starves everyone else. The tenant catalog (`tenants.json` → a DB table in production) is what assigns
+  roots to pools.
+
+The throughput *within* a single scan is already bounded by disk, not CPU — so the scanner's scaling
+axis is **breadth** (more tenants in parallel), while the generator/sync axis is **depth** (more
+workers on one stream). The broker makes both work without any service knowing about the others.
+
+> **In production (Kubernetes):** generator and sync are `Deployment`s with HPAs on consumer lag;
+> the scanner is a `Deployment` (or a `StatefulSet` / `Job` per tenant tier) sized to the number of
+> tenants scanning concurrently, not to one scan's size; the orchestrator is a `CronJob` or an
+> on-demand `Job` that fires a command and exits. Each scales on its own signal.
+
 ## Endpoints
 
 - **Redpanda Console** (topics, messages, consumer-group lag): http://localhost:8086
