@@ -10,8 +10,6 @@ CPU-bound generation step, followed by a delivery step — and lets the parts sc
 controlled independently. Nothing scans automatically: the scanner, generator, and sync-service are
 long-lived daemons that sit idle until commanded / fed work.
 
-See [PLAN.md](./PLAN.md) for the full architecture rationale and design decisions.
-
 ---
 
 ## How it works
