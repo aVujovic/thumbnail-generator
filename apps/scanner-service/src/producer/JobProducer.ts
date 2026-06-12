@@ -35,12 +35,17 @@ export class JobProducer {
     this.now = now;
   }
 
-  async produce(path: string, info: FileInfo, scanId?: string): Promise<void> {
+  async produce(
+    path: string,
+    info: FileInfo,
+    ctx: { scanId?: string; tenantId?: string } = {},
+  ): Promise<void> {
     const job: VideoJob = {
       path,
       size: info.size,
       discoveredAt: this.now(),
-      ...(scanId ? { scanId } : {}),
+      ...(ctx.scanId ? { scanId: ctx.scanId } : {}),
+      ...(ctx.tenantId ? { tenantId: ctx.tenantId } : {}),
     };
     await this.kafka.producer!.send({
       topic: this.config.topic,

@@ -1,43 +1,51 @@
-import { describe, it, expect } from 'vitest';
-import { homedir } from 'node:os';
+import { describe, it, expect, vi } from 'vitest';
 import { parseArgs } from './parseArgs.js';
 
 const id = () => 'generated-id';
+// Fake tenant resolver: tenant-1 → a known path, anything else throws.
+const resolveTenant = vi.fn((t: string) => {
+  if (t === 'tenant-1') return '/resolved/downloads';
+  throw new Error(`unknown tenant '${t}'`);
+});
 
 describe('parseArgs', () => {
-  it('builds StartScan with an explicit id and resolved root', () => {
-    expect(parseArgs(['start', '--root', '/data/movies', '--id', 'abc'], id)).toEqual({
+  it('builds StartScan from --tenant, resolving the path and carrying tenantId', () => {
+    expect(parseArgs(['start', '--tenant', 'tenant-1', '--id', 'abc'], id, resolveTenant)).toEqual({
       type: 'StartScan',
       scanId: 'abc',
-      scanRoot: '/data/movies',
+      scanRoot: '/resolved/downloads',
+      tenantId: 'tenant-1',
     });
   });
 
   it('generates a scanId when none is given', () => {
-    const cmd = parseArgs(['start', '--root', '/x'], id);
-    expect(cmd).toMatchObject({ type: 'StartScan', scanId: 'generated-id' });
+    const cmd = parseArgs(['start', '--tenant', 'tenant-1'], id, resolveTenant);
+    expect(cmd).toMatchObject({ type: 'StartScan', scanId: 'generated-id', tenantId: 'tenant-1' });
   });
 
-  it('expands ~ in the root', () => {
-    const cmd = parseArgs(['start', '--root', '~/Movies'], id);
-    expect(cmd).toMatchObject({ scanRoot: `${homedir()}/Movies` });
+  it('propagates an unknown-tenant error', () => {
+    expect(() => parseArgs(['start', '--tenant', 'nope'], id, resolveTenant)).toThrow(/unknown tenant/);
   });
 
-  it('requires --root for start', () => {
-    expect(() => parseArgs(['start'], id)).toThrow(/--root/);
+  it('requires --tenant for start (no raw paths)', () => {
+    expect(() => parseArgs(['start'], id, resolveTenant)).toThrow(/--tenant <id>/);
+    expect(() => parseArgs(['start', '--root', '/x'], id, resolveTenant)).toThrow(/--tenant <id>/);
   });
 
   it('builds StopScan with and without an id', () => {
-    expect(parseArgs(['stop', '--id', 'abc'], id)).toEqual({ type: 'StopScan', scanId: 'abc' });
-    expect(parseArgs(['stop'], id)).toEqual({ type: 'StopScan' });
+    expect(parseArgs(['stop', '--id', 'abc'], id, resolveTenant)).toEqual({
+      type: 'StopScan',
+      scanId: 'abc',
+    });
+    expect(parseArgs(['stop'], id, resolveTenant)).toEqual({ type: 'StopScan' });
   });
 
   it('builds Pause/Resume', () => {
-    expect(parseArgs(['pause'], id)).toEqual({ type: 'PauseGenerator' });
-    expect(parseArgs(['resume'], id)).toEqual({ type: 'ResumeGenerator' });
+    expect(parseArgs(['pause'], id, resolveTenant)).toEqual({ type: 'PauseGenerator' });
+    expect(parseArgs(['resume'], id, resolveTenant)).toEqual({ type: 'ResumeGenerator' });
   });
 
   it('rejects unknown commands', () => {
-    expect(() => parseArgs(['frobnicate'], id)).toThrow(/unknown command/);
+    expect(() => parseArgs(['frobnicate'], id, resolveTenant)).toThrow(/unknown command/);
   });
 });

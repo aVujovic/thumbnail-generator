@@ -54,8 +54,9 @@ directory, and **produces** `VideoJob`s (and `ScanStarted`/`ScanCompleted` event
 **consumes** the jobs, makes thumbnails, and writes results. No service ever calls another — Redpanda
 sits between every pair.
 
-1. **orchestrator-service** is a thin CLI. Each invocation publishes one command onto the
-   `scan-commands` topic and exits: `StartScan` (with a path and a `scanId`), `StopScan`,
+1. **orchestrator-service** is a thin CLI and the control plane. It resolves a `--tenant <id>` to a
+   scan root via the tenant catalog, then publishes one command onto the `scan-commands` topic and
+   exits: `StartScan` (with the resolved path, `scanId`, and `tenantId`), `StopScan`,
    `PauseGenerator`, `ResumeGenerator`. This is where scheduling/automation would live in production.
 2. **scanner-service** is a long-lived daemon consuming `scan-commands`. On `StartScan` it walks the
    given directory (iteratively, depth-guarded), detects videos by extension, and produces one
@@ -72,8 +73,11 @@ sits between every pair.
 ### Key principles
 
 - **Command-driven, nothing automatic** — daemons start idle and act only on orchestrator commands.
-  You can scan any directory at runtime, scan a different one, queue scans, stop, or pause/resume —
+  You can scan a tenant at runtime, scan a different one, queue scans, stop, or pause/resume —
   without restarting a process.
+- **Multi-tenant** — every scan is tenant-scoped; the orchestrator resolves `--tenant <id>` to a path
+  from its catalog, and the `tenantId` flows through jobs/events/results for per-tenant output and
+  tracking. Operators work with logical tenants, never raw paths.
 - **Command vs. event separation** — `scan-commands` carries imperatives (orchestrator → services);
   `scan-events` carries facts (scanner → orchestrator). Commands and events never share a topic.
 - **Decoupled producer/consumer** — scan and generation run in parallel; the first video is being
@@ -100,7 +104,7 @@ packages/
 └── core/          # @thumbnailer/core      — createService() + infra providers (config, logger, kafka,
                    #                            kafkaUtils, signals, commands) wired into one DI container
 apps/
-├── orchestrator-service/ # CLI: parseArgs → CommandPublisher → publishes a ScanCommand
+├── orchestrator-service/ # CLI: TenantResolver + parseArgs → CommandPublisher → publishes a ScanCommand
 ├── scanner-service/      # daemon: CommandConsumer → ScanManager → FileScanner / JobProducer / EventProducer
 └── generator-service/    # daemon: VideoJobConsumer → ThumbnailGenerator → ThumbnailStore + ResultRepository
 ```
@@ -117,8 +121,9 @@ apps/
   Each service then registers only its own domain classes; everything (logger, config, kafka client,
   lifecycle/shutdown) arrives via constructor injection. The interesting domain logic — commit
   semantics, timeout/kill/retry, the scan queue — stays visible in `apps/*`, not hidden in `core`.
-- **orchestrator-service** — a one-shot CLI. `parseArgs` turns the sub-command into a typed
-  `ScanCommand`; `CommandPublisher` sends it. No daemon, no business logic — it's the control surface.
+- **orchestrator-service** — a one-shot CLI and control plane. `TenantResolver` maps `--tenant <id>`
+  to a scan root (from `tenants.json`), `parseArgs` turns the sub-command into a typed `ScanCommand`,
+  and `CommandPublisher` sends it. No daemon, no business logic — just the control surface.
 - **scanner-service** — a daemon. `CommandConsumer` routes commands to `ScanManager`, which runs scans
   one at a time (FIFO queue) and is cancellable; `FileScanner` does the iterative walk, `JobProducer`
   emits `VideoJob`s, `EventProducer` emits lifecycle events.
@@ -134,13 +139,13 @@ For every processed video the generator appends one record to a results log
 (`OUTPUT_ROOT/results.jsonl` by default), in addition to writing the thumbnail image:
 
 ```json
-{"scanId":"dl-1","videoPath":"/data/movies/clip.mov","outputPath":"/out/.../clip.mov.jpg","size":3422636,"discoveredAt":1781208138506,"format":"jpg","status":"generated","attempts":1,"processedAt":1781208139348}
-{"scanId":"dl-1","videoPath":"/data/bad.mp4","outputPath":"/out/.../bad.mp4.jpg","size":262,"discoveredAt":1781208138485,"format":"jpg","status":"failed","attempts":3,"error":"exited with code 234","processedAt":1781208139037}
+{"scanId":"s-1","tenantId":"tenant-1","videoPath":"/data/movies/clip.mov","outputPath":"/out/tenant-1/data/movies/clip.mov.jpg","size":3422636,"discoveredAt":1781208138506,"format":"jpg","status":"generated","attempts":1,"processedAt":1781208139348}
+{"scanId":"s-1","tenantId":"tenant-1","videoPath":"/data/bad.mp4","outputPath":"/out/tenant-1/data/bad.mp4.jpg","size":262,"discoveredAt":1781208138485,"format":"jpg","status":"failed","attempts":3,"error":"exited with code 234","processedAt":1781208139037}
 ```
 
-Each line is one record with the video's metadata, the `scanId` (so results group back to the scan
-that produced them), and the terminal `status` (`generated` | `skipped` | `failed`, with the error
-reason on failure).
+Each line is one record with the video's metadata, the `scanId` and `tenantId` (so results group back
+to their scan and tenant), and the terminal `status` (`generated` | `skipped` | `failed`, with the
+error reason on failure).
 
 This is deliberately behind an **`IResultRepository`** interface, with a JSONL (append-only)
 implementation. **In production this would be a Postgres/MySQL table** — `save()` models a single
@@ -149,9 +154,9 @@ change to the consumer, the generator, or their tests. JSONL is used here becaus
 under concurrency (multiple consumers never clobber each other) and survives crashes — the same
 guarantees a row-insert gives, without standing up a database for the assessment.
 
-Thumbnails themselves mirror the source tree under `OUTPUT_ROOT`
-(e.g. `/data/movies/clip.mov` → `OUTPUT_ROOT/data/movies/clip.mov.jpg`) so two videos can never
-collide on the same output path.
+Thumbnails themselves mirror the source tree under `OUTPUT_ROOT/<tenantId>/`
+(e.g. `/data/movies/clip.mov` for `tenant-1` → `OUTPUT_ROOT/tenant-1/data/movies/clip.mov.jpg`) so
+neither two videos nor two tenants can ever collide on the same output path.
 
 ---
 
@@ -195,17 +200,18 @@ generator `waiting for jobs`. Nothing is scanned until you tell it to.
 **2. Drive the pipeline with the orchestrator** (in another terminal):
 
 ```bash
-pnpm scan:start --root ~/Movies          # scan a directory (auto-generated scanId)
-pnpm scan:start --root ~/Downloads --id dl-1   # explicit scanId for correlation
-pnpm scan:stop                            # cancel the running scan + clear the queue
-pnpm scan:stop --id dl-1                  # cancel/drop a specific scan
-pnpm gen:pause                            # pause thumbnail generation (jobs queue up)
-pnpm gen:resume                           # resume generation
+pnpm scan:start --tenant tenant-1          # scan tenant-1's directory
+pnpm scan:start --tenant tenant-1 --id s-1 # explicit scanId for correlation
+pnpm scan:stop                             # cancel the running scan + clear the queue
+pnpm scan:stop --id s-1                    # cancel/drop a specific scan
+pnpm gen:pause                             # pause thumbnail generation (jobs queue up)
+pnpm gen:resume                            # resume generation
 ```
 
-`--root` accepts absolute, relative, or `~`-prefixed paths (expanded the same way everywhere). Issue
-`scan:start` again to scan a **different** directory at any time; a scan already running is queued
-behind the current one (FIFO).
+Every scan is **tenant-scoped**: you pass a `--tenant <id>`, and the orchestrator resolves the
+directory from the tenant catalog (see [Tenants](#tenants) below) — raw paths are not accepted, since
+the scan root is a tenant configuration detail, not a CLI argument. Issue `scan:start` again for a
+different tenant at any time; a scan already running is queued behind the current one (FIFO).
 
 Watch progress in the **Redpanda Console** (http://localhost:8086) or in the daemon logs. Thumbnails
 land under `OUTPUT_ROOT` (mirror-tree) and every outcome is appended to `results.jsonl`.
@@ -213,6 +219,36 @@ land under `OUTPUT_ROOT` (mirror-tree) and every outcome is appended to `results
 > **Use `pnpm services` to run the daemons**, not `pnpm dev`. `pnpm dev` runs them under
 > `node --watch` for live code reload while developing; for actually running the pipeline use
 > `pnpm services` (no watch).
+
+## Tenants
+
+The system is **multi-tenant**: every scan runs for a tenant, and a `tenantId` flows through the whole
+pipeline (jobs, events, results) for isolation and tracking. The orchestrator owns the tenant catalog
+([tenants.json](./tenants.json)) — it maps a logical tenant id to a scan root:
+
+```json
+{
+  "tenant-1": { "scanRoot": "~/Downloads" },
+  "tenant-2": { "scanRoot": "~/Desktop" }
+}
+```
+
+`scanRoot` accepts absolute, relative, or `~`-prefixed paths. The catalog is the orchestrator's
+control-plane knowledge — the scanner and generator never see the tenant→path mapping, only the
+resolved path plus the `tenantId`.
+
+What the `tenantId` buys you:
+
+- **Resolution** — `pnpm scan:start --tenant tenant-1` → orchestrator looks up `~/Downloads` and
+  publishes `StartScan { tenantId, scanId, scanRoot }`.
+- **Per-tenant output** — thumbnails land under `OUTPUT_ROOT/<tenantId>/…` (mirror-tree inside), so
+  tenants never collide on disk.
+- **Per-tenant tracking** — every `results.jsonl` row carries the `tenantId`, so results group back
+  to their tenant.
+
+In production the catalog would be a database table; the path it points at would be the real
+production `IFileSystem` root, not a local directory. The configurable `TENANTS_FILE` env var points
+at the catalog (default: repo-root `tenants.json`).
 
 ## Endpoints
 
@@ -230,7 +266,7 @@ pnpm generate        # generator daemon only
 pnpm dev             # both daemons in watch mode (development only)
 
 # orchestration (control the running daemons)
-pnpm scan:start --root <path> [--id <id>]   # StartScan
+pnpm scan:start --tenant <id> [--id <id>]   # StartScan (path from tenants.json)
 pnpm scan:stop [--id <id>]                  # StopScan
 pnpm gen:pause                              # PauseGenerator
 pnpm gen:resume                             # ResumeGenerator
@@ -258,12 +294,12 @@ readable error). See [.env.example](./.env.example) for the full list. Most-used
 | Variable | Service | Description |
 |---|---|---|
 | `KAFKA_BROKERS` | all | Redpanda broker address (default `localhost:29092`) |
+| `TENANTS_FILE` | orchestrator | Path to the tenant catalog (default repo-root `tenants.json`) |
 | `SCANNER_GROUP_ID` | scanner | Consumer group for the scanner (must differ from the generator's) |
 | `GENERATOR_GROUP_ID` | generator | Consumer group for the generator |
 | `VIDEO_EXTENSIONS` | scanner | Comma-separated extensions to treat as video |
 | `SCAN_MAX_DEPTH` | scanner | Max directory depth (cheap cycle guard) |
-| `SCAN_ROOT` | scanner | Fallback scan root only — the orchestrator supplies the path per scan |
-| `OUTPUT_ROOT` | generator | Where thumbnails are written (mirror-tree) |
+| `OUTPUT_ROOT` | generator | Where thumbnails are written (`OUTPUT_ROOT/<tenantId>/`, mirror-tree) |
 | `RESULTS_PATH` | generator | Results JSONL path (default `OUTPUT_ROOT/results.jsonl`) |
 | `THUMBNAIL_FORMAT` | generator | Output image format (`jpg`, `png`, …) |
 | `GENERATE_CONCURRENCY` | generator | Max concurrent ffmpeg processes |
@@ -281,11 +317,13 @@ Unit tests cover:
 
 - **file-system walk** — deep trees, symlink cycles, permission/TOCTOU errors
 - **video detection** — extension allowlist, empty/unreadable skips
-- **scan orchestration** — `ScanManager` FIFO queue, run-one-at-a-time, cancel mid-scan, `scanId`
-  propagation; command parsing (`parseArgs`); command/event schema validation
-- **thumbnail generation** — timeout→kill (no zombie), retry, launch failure, idempotent skip
+- **scan orchestration** — `ScanManager` FIFO queue, run-one-at-a-time, cancel mid-scan,
+  `scanId`/`tenantId` propagation; command parsing (`parseArgs`); command/event schema validation
+- **tenants** — `TenantResolver` (resolve, `~` expansion, unknown-tenant error, catalog load/validate)
+- **thumbnail generation** — timeout→kill (no zombie), retry, launch failure, idempotent skip,
+  per-tenant output path
 - **Kafka semantics** — write-ahead commit / redeliver-on-crash, poison-message handling,
   pause/resume control
-- **result recording** — every status written, `scanId` carried through
+- **result recording** — every status written, `scanId` + `tenantId` carried through
 
 Everything runs with in-memory fakes — no real Kafka, ffmpeg, or disk.

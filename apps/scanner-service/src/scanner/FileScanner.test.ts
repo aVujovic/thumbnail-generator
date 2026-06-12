@@ -7,7 +7,7 @@ const detector = new VideoDetector({ config: { videoExtensions: ['mp4', 'mov'] }
 
 function scanner(
   root: Record<string, FakeEntry>,
-  over?: { maxDepth?: number; progressEvery?: number },
+  over?: { maxDepth?: number; progressEvery?: number; yieldEvery?: number },
 ) {
   const logger = new FakeLogger();
   const fs = new FakeFileSystem(root);
@@ -19,6 +19,7 @@ function scanner(
       scanRoot: '',
       maxDepth: over?.maxDepth ?? 64,
       progressEvery: over?.progressEvery ?? 0,
+      yieldEvery: over?.yieldEvery ?? 0,
     },
   });
   return { fileScanner, logger };

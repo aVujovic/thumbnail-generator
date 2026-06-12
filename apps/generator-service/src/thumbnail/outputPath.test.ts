@@ -21,4 +21,14 @@ describe('thumbnailOutputPath', () => {
     expect(thumbnailOutputPath('/out', '/../../etc/passwd.mp4')).toBe('/out/etc/passwd.mp4.jpg');
     expect(thumbnailOutputPath('/out', 'a/../../b/v.mp4')).toBe('/out/b/v.mp4.jpg');
   });
+
+  it('nests under a per-tenant subdirectory when a tenantId is given', () => {
+    expect(thumbnailOutputPath('/out', '/data/clip.mp4', 'jpg', 'tenant-1')).toBe(
+      '/out/tenant-1/data/clip.mp4.jpg',
+    );
+  });
+
+  it('keeps the tenant segment from escaping the root', () => {
+    expect(thumbnailOutputPath('/out', '/v.mp4', 'jpg', '../evil')).toBe('/out/evil/v.mp4.jpg');
+  });
 });

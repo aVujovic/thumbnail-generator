@@ -12,6 +12,18 @@ interface ScannerConfig {
   maxDepth: number;
   /** Emit a progress log every N entries scanned (0 disables). */
   progressEvery: number;
+  /**
+   * Yield the event loop every N entries. The IFileSystem is synchronous
+   * (statSync/readdirSync), so a large scan would otherwise hog the event loop
+   * and starve the Kafka consumer's heartbeat — the broker would then evict the
+   * scanner from the group mid-scan. Pausing periodically lets the heartbeat run.
+   */
+  yieldEvery: number;
+}
+
+/** Hand control back to the event loop so timers (e.g. Kafka heartbeat) can fire. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 /**
@@ -96,6 +108,11 @@ export class FileScanner {
         scanned++;
         if (progressEvery > 0 && scanned % progressEvery === 0) {
           this.logger.info({ scanned, videos, queued: stack.length }, 'scanning…');
+        }
+        // Periodically hand control back so the Kafka heartbeat can fire and the
+        // scanner isn't evicted from the group during a long scan.
+        if (this.config.yieldEvery > 0 && scanned % this.config.yieldEvery === 0) {
+          await yieldToEventLoop();
         }
 
         if (info.isDirectory) {

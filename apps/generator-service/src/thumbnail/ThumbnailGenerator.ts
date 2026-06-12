@@ -90,6 +90,7 @@ export class ThumbnailGenerator {
       this.config.outputRoot,
       job.path,
       this.config.thumbnailFormat,
+      job.tenantId,
     );
 
     if (!this.config.force && this.store.exists(outputPath)) {

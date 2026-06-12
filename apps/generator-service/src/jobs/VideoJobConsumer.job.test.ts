@@ -6,7 +6,7 @@ import {
   type ThumbnailResult,
   type VideoJob,
 } from '@thumbnailer/contracts';
-import { KafkaUtils, type KafkaConnection, type Signals } from '@thumbnailer/core';
+import { KafkaUtils, type KafkaConnection } from '@thumbnailer/core';
 import type { EachMessagePayload } from 'kafkajs';
 import { VideoJobConsumer } from './VideoJobConsumer.job.js';
 import type { ThumbnailGenerator, GenerateResult } from '../thumbnail/ThumbnailGenerator.js';
@@ -38,7 +38,6 @@ async function harness(generateResult: GenerateResult | Error) {
 
   const kafka = { consumer } as unknown as KafkaConnection;
   const logger = new FakeLogger();
-  const signals = { onTerm: vi.fn() } as unknown as Signals;
 
   const generator = {
     generate: vi.fn(async () => {
@@ -64,7 +63,6 @@ async function harness(generateResult: GenerateResult | Error) {
       } as never,
       kafka,
       kafkaUtils: new KafkaUtils({ logger }),
-      signals,
       thumbnailGenerator: generator,
       resultRepository,
     },
@@ -72,7 +70,7 @@ async function harness(generateResult: GenerateResult | Error) {
   );
 
   await consumerJob.start();
-  return { handler, commitOffsets, generator, logger, signals, saved, pause, resume };
+  return { handler, commitOffsets, generator, logger, saved, pause, resume };
 }
 
 function payload(value: Buffer | null, offset = '5'): EachMessagePayload {
@@ -151,11 +149,6 @@ describe('VideoJobConsumer commit semantics', () => {
     await expect(handler(payload(serializeVideoJob(job)))).rejects.toThrow('unexpected crash');
     expect(commitOffsets).not.toHaveBeenCalled(); // offset stays → message redelivered
   });
-
-  it('registers a graceful-shutdown teardown via signals', async () => {
-    const { signals } = await harness({ status: 'skipped', outputPath: '/x', reason: 'exists' });
-    expect(signals.onTerm).toHaveBeenCalledOnce();
-  });
 });
 
 describe('VideoJobConsumer result recording', () => {
@@ -225,6 +218,16 @@ describe('VideoJobConsumer result recording', () => {
     });
     await handler(payload(serializeVideoJob({ ...job, scanId: 'scan-9' })));
     expect(saved[0]).toMatchObject({ scanId: 'scan-9' });
+  });
+
+  it('carries tenantId from the job onto the result', async () => {
+    const { handler, saved } = await harness({
+      status: 'generated',
+      outputPath: '/out/tenant-1/x.jpg',
+      attempts: 1,
+    });
+    await handler(payload(serializeVideoJob({ ...job, tenantId: 'tenant-1' })));
+    expect(saved[0]).toMatchObject({ tenantId: 'tenant-1' });
   });
 });
 

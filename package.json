@@ -20,6 +20,7 @@
     "gen:pause": "pnpm --filter orchestrator-service start pause",
     "gen:resume": "pnpm --filter orchestrator-service start resume",
     "services": "pnpm --parallel --filter generator-service --filter scanner-service start",
+    "kill": "pkill -9 -f 'import tsx.*src/service.ts' 2>/dev/null; echo 'service daemons killed'",
     "up": "pnpm infra:up && pnpm topic:create && pnpm services",
     "dev": "pnpm --parallel --filter generator-service --filter scanner-service dev",
     "build": "turbo build",

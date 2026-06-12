@@ -10,11 +10,13 @@ export const ScanEventSchema = z.discriminatedUnion('type', [
     type: z.literal('ScanStarted'),
     scanId: z.string().min(1),
     scanRoot: z.string().min(1),
+    tenantId: z.string().min(1).optional(),
     startedAt: z.number().int().nonnegative(),
   }),
   z.object({
     type: z.literal('ScanCompleted'),
     scanId: z.string().min(1),
+    tenantId: z.string().min(1).optional(),
     /** Number of VideoJobs produced. */
     produced: z.number().int().nonnegative(),
     completedAt: z.number().int().nonnegative(),
@@ -22,6 +24,7 @@ export const ScanEventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('ScanCancelled'),
     scanId: z.string().min(1),
+    tenantId: z.string().min(1).optional(),
     /** Jobs produced before cancellation. */
     produced: z.number().int().nonnegative(),
     cancelledAt: z.number().int().nonnegative(),

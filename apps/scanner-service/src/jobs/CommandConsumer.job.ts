@@ -75,7 +75,11 @@ export class CommandConsumer {
   private handle(command: ReturnType<typeof parseScanCommand>): void {
     switch (command!.type) {
       case SCAN_COMMAND.StartScan:
-        this.scanManager.enqueue({ scanId: command!.scanId, scanRoot: command!.scanRoot });
+        this.scanManager.enqueue({
+          scanId: command!.scanId,
+          scanRoot: command!.scanRoot,
+          tenantId: command!.tenantId,
+        });
         break;
       case SCAN_COMMAND.StopScan:
         this.scanManager.stop(command!.scanId);

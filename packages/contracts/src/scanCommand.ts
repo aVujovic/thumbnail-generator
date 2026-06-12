@@ -27,6 +27,8 @@ export const ScanCommandSchema = z.discriminatedUnion('type', [
     scanId: z.string().min(1),
     /** Directory to scan (recursively). */
     scanRoot: z.string().min(1),
+    /** Tenant this scan runs for; flows onto every VideoJob/result. */
+    tenantId: z.string().min(1).optional(),
   }),
   z.object({
     type: z.literal(SCAN_COMMAND.StopScan),
@@ -45,10 +47,11 @@ export type StartScanCommand = Extract<ScanCommand, { type: 'StartScan' }>;
  * Producers (the orchestrator) call these instead of hand-writing `{ type, … }`.
  */
 export const scanCommands = {
-  startScan: (scanId: string, scanRoot: string): ScanCommand => ({
+  startScan: (scanId: string, scanRoot: string, tenantId?: string): ScanCommand => ({
     type: SCAN_COMMAND.StartScan,
     scanId,
     scanRoot,
+    ...(tenantId ? { tenantId } : {}),
   }),
   stopScan: (scanId?: string): ScanCommand =>
     scanId ? { type: SCAN_COMMAND.StopScan, scanId } : { type: SCAN_COMMAND.StopScan },

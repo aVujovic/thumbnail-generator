@@ -22,6 +22,9 @@ export const ConfigSchema = z
     SCAN_MAX_DEPTH: z.coerce.number().int().positive().default(64),
     // Emit an info-level progress line every N entries scanned (0 = off).
     SCAN_PROGRESS_EVERY: z.coerce.number().int().nonnegative().default(1000),
+    // Yield the event loop every N entries so the Kafka heartbeat keeps firing
+    // during a large scan (sync fs would otherwise hog the loop). 0 = never.
+    SCAN_YIELD_EVERY: z.coerce.number().int().nonnegative().default(500),
     VIDEO_EXTENSIONS: z
       .string()
       .default('mp4,mov,mkv,avi,webm,m4v,mpg,mpeg,wmv,flv'),
@@ -38,6 +41,7 @@ export const ConfigSchema = z
     scanRoot: resolvePath(env.SCAN_ROOT),
     maxDepth: env.SCAN_MAX_DEPTH,
     progressEvery: env.SCAN_PROGRESS_EVERY,
+    yieldEvery: env.SCAN_YIELD_EVERY,
     videoExtensions: env.VIDEO_EXTENSIONS.split(',')
       .map((e) => e.trim().toLowerCase().replace(/^\./, ''))
       .filter(Boolean),

@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, lstatSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import type { FileInfo, IFileSystem } from '@thumbnailer/domain';
 
@@ -16,7 +16,12 @@ export class LocalFileSystem implements IFileSystem {
   }
 
   openFile(path: string): FileInfo {
-    const st = statSync(path);
+    // lstat (not stat): do NOT follow symlinks. A followed symlink that points
+    // back at an ancestor (common in node_modules / .app bundles) turns the walk
+    // into an effectively infinite tree. With lstat a symlink reports as neither
+    // a directory nor a regular file, so the walk simply skips it — exactly what
+    // `find` does by default. The depth guard is only a backstop.
+    const st = lstatSync(path);
     return {
       name: basename(path),
       isDirectory: st.isDirectory(),

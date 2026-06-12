@@ -6,6 +6,7 @@ import type { EventProducer } from '../producer/EventProducer.js';
 interface QueuedScan {
   scanId: string;
   scanRoot: string;
+  tenantId?: string;
 }
 
 /**
@@ -95,20 +96,22 @@ export class ScanManager {
   }
 
   private async runScan(scan: QueuedScan): Promise<void> {
-    const { scanId, scanRoot } = scan;
+    const { scanId, scanRoot, tenantId } = scan;
+    const tenant = tenantId ? { tenantId } : {};
     await this.eventProducer.emit({
       type: 'ScanStarted',
       scanId,
       scanRoot,
+      ...tenant,
       startedAt: this.now(),
     });
-    this.logger.info({ scanId, scanRoot }, 'scan started');
+    this.logger.info({ scanId, scanRoot, tenantId }, 'scan started');
 
     let produced = 0;
     for await (const { path, info } of this.fileScanner.walk(scanRoot)) {
       if (this.cancelled) break;
       try {
-        await this.jobProducer.produce(path, info, scanId);
+        await this.jobProducer.produce(path, info, { scanId, tenantId });
         produced++;
       } catch (err) {
         if (this.cancelled) break;
@@ -120,6 +123,7 @@ export class ScanManager {
       await this.eventProducer.emit({
         type: 'ScanCancelled',
         scanId,
+        ...tenant,
         produced,
         cancelledAt: this.now(),
       });
@@ -128,6 +132,7 @@ export class ScanManager {
       await this.eventProducer.emit({
         type: 'ScanCompleted',
         scanId,
+        ...tenant,
         produced,
         completedAt: this.now(),
       });

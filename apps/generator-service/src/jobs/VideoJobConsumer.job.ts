@@ -6,7 +6,7 @@ import {
   type VideoJob,
 } from '@thumbnailer/contracts';
 import type { ILogger } from '@thumbnailer/domain';
-import type { KafkaConnection, KafkaUtils, Signals } from '@thumbnailer/core';
+import type { KafkaConnection, KafkaUtils } from '@thumbnailer/core';
 import type { GeneratorConfig } from '../config.schema.js';
 import type { ThumbnailGenerator } from '../thumbnail/ThumbnailGenerator.js';
 import type { IResultRepository } from '../repository/ResultRepository.js';
@@ -25,7 +25,6 @@ export class VideoJobConsumer {
   private readonly config: GeneratorConfig;
   private readonly kafka: KafkaConnection;
   private readonly kafkaUtils: KafkaUtils;
-  private readonly signals: Signals;
   private readonly generator: ThumbnailGenerator;
   private readonly results: IResultRepository;
   private readonly now: () => number;
@@ -39,7 +38,6 @@ export class VideoJobConsumer {
       config: GeneratorConfig;
       kafka: KafkaConnection;
       kafkaUtils: KafkaUtils;
-      signals: Signals;
       thumbnailGenerator: ThumbnailGenerator;
       resultRepository: IResultRepository;
     },
@@ -49,7 +47,6 @@ export class VideoJobConsumer {
     this.config = deps.config;
     this.kafka = deps.kafka;
     this.kafkaUtils = deps.kafkaUtils;
-    this.signals = deps.signals;
     this.generator = deps.thumbnailGenerator;
     this.results = deps.resultRepository;
     this.now = now;
@@ -66,13 +63,6 @@ export class VideoJobConsumer {
       fromBeginning: this.config.fromBeginning,
     });
     await consumer.subscribe({ topic: this.config.commandsTopic, fromBeginning: false });
-
-    // Register graceful teardown: stop the consumer on SIGINT/SIGTERM, in the
-    // central ordered registry (core's signals provider).
-    this.signals.onTerm(async () => {
-      await consumer.stop();
-      this.logger.info('🛑 consumer stopped');
-    });
 
     this.logger.info(
       {
@@ -129,6 +119,7 @@ export class VideoJobConsumer {
 
     const record: ThumbnailResult = {
       ...(job.scanId ? { scanId: job.scanId } : {}),
+      ...(job.tenantId ? { tenantId: job.tenantId } : {}),
       videoPath: job.path,
       outputPath: result.outputPath,
       size: job.size,

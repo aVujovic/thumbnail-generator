@@ -9,6 +9,8 @@ import { z } from 'zod';
 export const ThumbnailResultSchema = z.object({
   /** The scan this result belongs to (if the job carried one). */
   scanId: z.string().min(1).optional(),
+  /** The tenant this result belongs to (if the job carried one). */
+  tenantId: z.string().min(1).optional(),
   /** Source video path. */
   videoPath: z.string().min(1),
   /** Where the thumbnail was (or would be) written. */

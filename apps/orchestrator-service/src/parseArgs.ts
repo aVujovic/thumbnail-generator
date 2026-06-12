@@ -1,37 +1,41 @@
-import { homedir } from 'node:os';
-import { resolve } from 'node:path';
 import { scanCommands, type ScanCommand } from '@thumbnailer/contracts';
-
-/** Expand `~` and resolve to an absolute path (same rules as the services). */
-function resolvePath(p: string): string {
-  if (p === '~') return homedir();
-  if (p.startsWith('~/')) return resolve(homedir(), p.slice(2));
-  return resolve(p);
-}
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(`--${name}`);
   return i !== -1 ? args[i + 1] : undefined;
 }
 
+/** Resolves a tenantId to its scan root (injected so parseArgs stays pure/testable). */
+export type ResolveTenant = (tenantId: string) => string;
+
 /**
- * Turn CLI args into a ScanCommand. Pure (no I/O) so it's unit-testable. The
- * `newId` factory makes scanId generation injectable for deterministic tests.
+ * Turn CLI args into a ScanCommand. Pure (no I/O) — tenant resolution is
+ * injected via `resolveTenant`, scanId generation via `newId`.
+ *
+ * Every scan is tenant-scoped: the orchestrator only accepts a `--tenant <id>`
+ * and resolves the path from its catalog. Raw paths are not accepted — the
+ * scan root is a tenant configuration detail, never a CLI argument.
  *
  * Usage:
- *   start  --root <path> [--id <scanId>]   StartScan
+ *   start  --tenant <id> [--id <scanId>]   StartScan (path resolved from catalog)
  *   stop   [--id <scanId>]                 StopScan
  *   pause                                  PauseGenerator
  *   resume                                 ResumeGenerator
  */
-export function parseArgs(argv: string[], newId: () => string): ScanCommand {
+export function parseArgs(
+  argv: string[],
+  newId: () => string,
+  resolveTenant: ResolveTenant,
+): ScanCommand {
   const [sub, ...rest] = argv;
 
   switch (sub) {
     case 'start': {
-      const root = flag(rest, 'root');
-      if (!root) throw new Error('start requires --root <path>');
-      return scanCommands.startScan(flag(rest, 'id') ?? newId(), resolvePath(root));
+      const tenant = flag(rest, 'tenant');
+      if (!tenant) throw new Error('start requires --tenant <id>');
+      const scanId = flag(rest, 'id') ?? newId();
+      // Tenant-driven: the orchestrator resolves the path from its catalog.
+      return scanCommands.startScan(scanId, resolveTenant(tenant), tenant);
     }
     case 'stop':
       return scanCommands.stopScan(flag(rest, 'id'));
@@ -41,7 +45,8 @@ export function parseArgs(argv: string[], newId: () => string): ScanCommand {
       return scanCommands.resumeGenerator();
     default:
       throw new Error(
-        `unknown command '${sub ?? ''}'. Use: start --root <path> | stop [--id <id>] | pause | resume`,
+        `unknown command '${sub ?? ''}'. Use: ` +
+          `start --tenant <id> | stop [--id <id>] | pause | resume`,
       );
   }
 }

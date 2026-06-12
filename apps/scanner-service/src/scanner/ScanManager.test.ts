@@ -24,10 +24,10 @@ function fakeScanner(count: number, onYield?: () => void): FileScanner {
 
 function harness(scanner: FileScanner) {
   const logger = new FakeLogger();
-  const produced: Array<{ path: string; scanId?: string }> = [];
+  const produced: Array<{ path: string; scanId?: string; tenantId?: string }> = [];
   const jobProducer = {
-    produce: vi.fn(async (path: string, _info: FileInfo, scanId?: string) =>
-      void produced.push({ path, scanId }),
+    produce: vi.fn(async (path: string, _info: FileInfo, ctx?: { scanId?: string; tenantId?: string }) =>
+      void produced.push({ path, scanId: ctx?.scanId, tenantId: ctx?.tenantId }),
     ),
   } as unknown as JobProducer;
   const events: ScanEvent[] = [];
@@ -53,6 +53,17 @@ describe('ScanManager', () => {
     expect(produced.every((p) => p.scanId === 'scan-A')).toBe(true);
     expect(events.map((e) => e.type)).toEqual(['ScanStarted', 'ScanCompleted']);
     expect(events[1]).toMatchObject({ type: 'ScanCompleted', scanId: 'scan-A', produced: 3 });
+  });
+
+  it('propagates tenantId onto produced jobs and emitted events', async () => {
+    const { mgr, produced, events } = harness(fakeScanner(2));
+
+    mgr.enqueue({ scanId: 'scan-T', scanRoot: '/root', tenantId: 'tenant-1' });
+    await flush();
+
+    expect(produced.every((p) => p.tenantId === 'tenant-1')).toBe(true);
+    expect(events[0]).toMatchObject({ type: 'ScanStarted', tenantId: 'tenant-1' });
+    expect(events[1]).toMatchObject({ type: 'ScanCompleted', tenantId: 'tenant-1' });
   });
 
   it('runs queued scans one at a time, in FIFO order', async () => {

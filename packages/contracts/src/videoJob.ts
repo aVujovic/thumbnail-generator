@@ -16,6 +16,8 @@ export const VideoJobSchema = z.object({
   discoveredAt: z.number().int().nonnegative(),
   /** The scan this job belongs to — correlates jobs/results back to a scan. */
   scanId: z.string().min(1).optional(),
+  /** The tenant this job belongs to — drives per-tenant output + tracking. */
+  tenantId: z.string().min(1).optional(),
 });
 
 export type VideoJob = z.infer<typeof VideoJobSchema>;
