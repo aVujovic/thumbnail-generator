@@ -6,8 +6,8 @@ import type { z } from 'zod';
  * to createService; we validate `process.env` against it once at startup and
  * fail fast with a readable error if anything is missing/invalid.
  *
- * Env-driven (rather than the config-file approach in nodex) because these are
- * headless workers deployed via docker-compose — 12-factor config fits better.
+ * Env-driven because these are headless workers deployed via docker-compose —
+ * 12-factor config fits better than a config file.
  */
 export function makeConfigProvider<S extends z.ZodTypeAny>(
   schema: S,

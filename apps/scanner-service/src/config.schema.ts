@@ -12,6 +12,10 @@ export const ConfigSchema = z
     TOPIC_SCAN_COMMANDS: z.string().min(1).default('scan-commands'),
     TOPIC_SCAN_EVENTS: z.string().min(1).default('scan-events'),
     SCANNER_GROUP_ID: z.string().min(1).default('scanners'),
+    // Shorter than kafkajs' 30s default so a dead/ghost consumer is evicted
+    // quickly — otherwise a new scanner waits out the timeout before the
+    // rebalance completes and it can fetch commands.
+    KAFKA_SESSION_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
     // Fallback scan root — used only if a StartScan command omits one is not
     // expected; the orchestrator supplies scanRoot per scan.
     SCAN_ROOT: z.string().min(1).default('/data'),
@@ -45,7 +49,10 @@ export const ConfigSchema = z
       clientId: env.KAFKA_CLIENT_ID,
       // Daemon: consumes commands, produces video-jobs + scan-events.
       mode: 'both' as const,
-      consumer: { groupId: env.SCANNER_GROUP_ID },
+      consumer: {
+        groupId: env.SCANNER_GROUP_ID,
+        sessionTimeoutMs: env.KAFKA_SESSION_TIMEOUT_MS,
+      },
     },
   }));
 

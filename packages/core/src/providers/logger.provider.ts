@@ -2,8 +2,7 @@ import pino, { type Logger as PinoLogger } from 'pino';
 import type { ILogger } from '@thumbnailer/domain';
 
 /**
- * Builds the root logger for the service. Ported from xenosis-core
- * (nodex/src/core/logger.ts).
+ * Builds the root logger for the service.
  *
  * - Production (`env: 'production'`): JSON, one log per line, no pretty printing.
  * - Anything else: human-readable via `pino-pretty` with colour + timestamp.

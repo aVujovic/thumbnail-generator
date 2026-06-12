@@ -1,7 +1,6 @@
 /**
- * Structured logger contract. Ported from the xenosis-core logger interface
- * (nodex/src/types.ts). First argument may be a plain message string or an
- * object of fields followed by an optional message.
+ * Structured logger contract. The first argument may be a plain message string
+ * or an object of fields followed by an optional message.
  *
  *   logger.info('scan started');
  *   logger.info({ path }, 'video found');

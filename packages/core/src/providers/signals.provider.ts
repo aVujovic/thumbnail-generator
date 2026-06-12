@@ -3,8 +3,7 @@ import type { ILogger } from '@thumbnailer/domain';
 type TermHandler = () => Promise<void> | void;
 
 /**
- * Centralised process-signal handling. Ported from xenosis-core
- * (nodex/src/runtime/signals.ts), trimmed to the non-worker case.
+ * Centralised process-signal handling.
  *
  * Any provider or service registers a teardown callback via `onTerm()`.
  * On SIGTERM / SIGINT every handler runs in registration order, then the

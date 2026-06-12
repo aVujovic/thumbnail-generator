@@ -10,7 +10,7 @@ import { Commands } from './providers/commands.provider.js';
 
 /**
  * Registers every cross-cutting infrastructure provider into the given awilix
- * container in one call (the `@gamerstake/core` / xenosis-core pattern).
+ * container in one call.
  *
  * After this returns, the cradle exposes: config, logger, kafka, kafkaUtils,
  * signals, commands. Each service then registers only its own domain classes,

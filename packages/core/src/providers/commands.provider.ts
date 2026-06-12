@@ -3,9 +3,7 @@ import type { KafkaConnection } from './kafka.provider.js';
 import type { Signals } from './signals.provider.js';
 
 /**
- * Service lifecycle. Adapted from xenosis-core (nodex/src/runtime/commands.ts)
- * with the HTTP/Express machinery removed — this is a headless worker, not a
- * web server.
+ * Service lifecycle for a headless worker (no HTTP server).
  *
  * `start()` connects the wired Kafka clients and registers their teardown with
  * the central Signals registry, so SIGINT/SIGTERM drains them in order. Domain

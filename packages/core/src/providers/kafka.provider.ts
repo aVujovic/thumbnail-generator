@@ -3,7 +3,6 @@ import type { Kafka, Producer, Consumer } from 'kafkajs';
 import type { ILogger } from '@thumbnailer/domain';
 
 // ESM-safe `require` so kafkajs is only loaded when this provider runs.
-// Ported from xenosis-core (nodex/src/connectors/kafka.ts).
 const require = createRequire(import.meta.url);
 
 export interface KafkaConnection {

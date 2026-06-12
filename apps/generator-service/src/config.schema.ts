@@ -10,7 +10,9 @@ export const ConfigSchema = z
     KAFKA_BROKERS: z.string().min(1),
     GENERATOR_GROUP_ID: z.string().min(1).default('thumbnail-generators'),
     KAFKA_CLIENT_ID: z.string().min(1).default('generator-service'),
-    KAFKA_SESSION_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+    // Shorter than kafkajs' 30s default so a dead/ghost consumer is evicted
+    // quickly and the group rebalances fast on (re)start.
+    KAFKA_SESSION_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
     KAFKA_FROM_BEGINNING: booleanish.default('true'),
     TOPIC_VIDEO_JOBS: z.string().min(1).default('video-jobs'),
     TOPIC_SCAN_COMMANDS: z.string().min(1).default('scan-commands'),
@@ -75,9 +77,7 @@ export const ConfigSchema = z
       mode: 'consumer' as const,
       consumer: {
         groupId: env.GENERATOR_GROUP_ID,
-        ...(env.KAFKA_SESSION_TIMEOUT_MS !== undefined
-          ? { sessionTimeoutMs: env.KAFKA_SESSION_TIMEOUT_MS }
-          : {}),
+        sessionTimeoutMs: env.KAFKA_SESSION_TIMEOUT_MS,
       },
     },
   }));
