@@ -413,6 +413,53 @@ stream). The broker makes both work without any service knowing about the others
 > tenants scanning concurrently, not to one scan's size; the orchestrator is a `CronJob` or an
 > on-demand `Job` that fires a command and exits. Each scales on its own signal.
 
+### Sharding by user within a tenant (next level — not yet implemented)
+
+Keying `scan-commands` by `tenantId` evens out the *number of tenants* per scanner, but not the
+*amount of work*: if `tenant-A` has 2M users and `tenant-B` has 10k, both still land on one partition
+→ one scanner. `tenant-A` becomes a **hot partition** — a single scanner grinds through 200× the work
+while the rest idle. Partitioning by tenant balances tenant *count*, but work is what saturates a node.
+
+The fix is the **same hash-mod-partitions machinery, one level finer**: make the shard key
+`tenantId:userId` (or a `tenantId:userBucket = hash(userId) % 256` to cap message volume). Now
+`tenant-A`'s 2M users hash across *all* partitions → all scanners; no single instance owns a whole giant
+tenant. Sharding becomes **hierarchical** — tenant → user → (already) video — and each level is just a
+finer shard key on the same Kafka partitioning. Rule of thumb: **shard on whatever is your hot-spot.**
+Uneven tenants → drop the key from tenant down to user.
+
+This changes the unit of work from "scan a tenant" to "scan a user" (its `scanRoot` resolved per user
+from a `users` catalog), so the fan-out has to come from somewhere. Two ways:
+
+| Approach | How | Trade-off |
+|---|---|---|
+| **Orchestrator fan-out** | the control plane lists a tenant's users and publishes one `StartScan` per user (or per bucket), keyed by `tenantId:userId` | orchestrator must know every user (a DB query); millions of messages are fine for Kafka but the control plane gets "fat" |
+| **Two-stage (recommended)** | `StartScan tenant-A` goes to a *discovery* scanner that lists the tenant's users and republishes per-user `ScanUser` commands back onto the topic (keyed by user) | the fan-out is itself distributed and crash-resilient; the control plane stays thin — it's the same producer/consumer pattern, applied recursively |
+
+The two-stage approach keeps the broker doing the distribution: discovery is a cheap directory-list, and
+the heavy per-user scans then shard across the pool with the same exactly-one-owner + failover
+guarantees as everything else.
+
+### Batch scanning (production add-on — micro-batching the trigger)
+
+Today a command triggers a scan **immediately** — right for interactive, on-demand scans. But once the
+control plane fans out millions of per-user commands (above), one-command-one-scan-now becomes *chatty*:
+every tiny scan carries its own `ScanStarted`/`ScanCompleted` events, its own commit, its own overhead —
+more coordination than work.
+
+A small logic change fixes it: the scanner **accumulates** commands and flushes them as one batch when
+**either** of two thresholds trips first —
+
+- **time**: every N seconds (e.g. 5s), so a rarely-active tenant never waits forever, and
+- **count**: once X commands pile up (e.g. 500 users), so a busy tenant doesn't build an unbounded batch.
+
+This is the classic debounce/window pattern (the same idea as a Kafka producer's `linger.ms` +
+`batch.size`, or a DB's batched `INSERT`). It's a **trade-off, not a free win**: a bigger batch / longer
+window means better throughput (less per-scan overhead) but higher latency before any one scan starts —
+so it's a production knob, defaulting to "act immediately" for the interactive case and tuned up for
+mass nightly scans. Crucially it **does not change the sharding** (the key is still `tenantId:userId`);
+it only changes *when* a scanner acts, not *where* the work lands — so it composes cleanly with
+hierarchical sharding above.
+
 ## Endpoints
 
 - **Redpanda Console** (topics, messages, consumer-group lag): http://localhost:8086
