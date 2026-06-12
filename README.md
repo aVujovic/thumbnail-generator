@@ -81,7 +81,8 @@ sits between every pair.
 - **Command vs. event separation** — `scan-commands` carries imperatives (orchestrator → services);
   `scan-events` carries facts (scanner → orchestrator). Commands and events never share a topic.
 - **Decoupled producer/consumer** — scan and generation run in parallel; the first video is being
-  processed while the scan is still walking.
+  processed while the scan is still walking. The slow generator scales horizontally — run more
+  instances and the broker splits the work across them, no code change (see [Scaling](#scaling-the-generator)).
 - **Write-ahead commit** — a video-job offset is committed only *after* the job reaches a terminal
   state (`autoCommit: false`). A crash mid-work redelivers the message, so no thumbnail is silently lost.
 - **Resilient by default** — permission errors, broken symlinks, TOCTOU races, ffmpeg hangs, corrupt
@@ -249,6 +250,41 @@ What the `tenantId` buys you:
 In production the catalog would be a database table; the path it points at would be the real
 production `IFileSystem` root, not a local directory. The configurable `TENANTS_FILE` env var points
 at the catalog (default: repo-root `tenants.json`).
+
+## Scaling the generator
+
+The scanner is fast (it only reads file-system metadata); the generator is slow (one ffmpeg run per
+video, seconds each). So the generator is the bottleneck, and it's where you scale out. Because all
+generators join the same Kafka consumer group (`thumbnail-generators`), the broker **partitions the
+work across them automatically** — no code change, no internal thread pool. This is why the generator
+is intentionally a simple one-job-at-a-time consumer: parallelism is a deployment concern, not a code
+concern.
+
+Two things matter:
+
+1. **The `video-jobs` topic needs N partitions.** A partition is the unit of parallelism: each is
+   consumed by exactly one generator in the group. With the default 1 partition, only one generator
+   ever gets messages (the rest sit idle). For N parallel generators, create the topic with N
+   partitions:
+   ```bash
+   docker exec thumbnailer-redpanda rpk topic create video-jobs -p 4 -X brokers=localhost:9092
+   ```
+2. **Run the generator process N times.** Same command, more instances — the broker assigns each a
+   share of the partitions:
+   ```bash
+   # in N separate terminals (or backgrounded), from the repo root:
+   pnpm generate
+   ```
+
+Measured locally: scanning `~/Desktop` produced 175 video jobs. With **one** generator the queue
+backed up (lag ~90, generator trailing the scan); with **three** generators sharing 4 partitions the
+175 jobs were split (40 / 51 / 84) and the lag stayed at ~0 — the generators kept up with the scan.
+Scaling is horizontal and requires no code change.
+
+> **In production this is Kubernetes.** The generator becomes a `Deployment` with `replicas: N`
+> (or an HPA that auto-scales on Kafka consumer lag), and the topic is provisioned with enough
+> partitions to match peak replica count. The local "run it N times" above is just the dev-time
+> equivalent of bumping replicas.
 
 ## Endpoints
 
