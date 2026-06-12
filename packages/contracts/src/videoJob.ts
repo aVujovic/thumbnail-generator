@@ -14,6 +14,8 @@ export const VideoJobSchema = z.object({
   size: z.number().int().nonnegative(),
   /** Epoch millis when the scanner discovered the file. */
   discoveredAt: z.number().int().nonnegative(),
+  /** The scan this job belongs to — correlates jobs/results back to a scan. */
+  scanId: z.string().min(1).optional(),
 });
 
 export type VideoJob = z.infer<typeof VideoJobSchema>;

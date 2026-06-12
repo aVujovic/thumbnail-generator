@@ -46,11 +46,13 @@ export class FileScanner {
     this.config = deps.config;
   }
 
-  /** Yield every video under `scanRoot`, depth-first, lazily. */
-  async *walk(): AsyncGenerator<DiscoveredVideo> {
-    const stack: Array<{ path: string; depth: number }> = [
-      { path: this.config.scanRoot, depth: 0 },
-    ];
+  /**
+   * Yield every video under `scanRoot`, depth-first, lazily. The root defaults
+   * to config (one-shot mode) but can be overridden per scan, so the
+   * command-driven daemon can scan different directories on demand.
+   */
+  async *walk(scanRoot: string = this.config.scanRoot): AsyncGenerator<DiscoveredVideo> {
+    const stack: Array<{ path: string; depth: number }> = [{ path: scanRoot, depth: 0 }];
 
     // Heartbeat so a long scan over a large tree shows it's alive — most
     // entries (non-videos, broken links) are otherwise silent at info level.

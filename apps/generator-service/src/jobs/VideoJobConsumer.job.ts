@@ -1,4 +1,10 @@
-import { parseVideoJob, type ThumbnailResult, type VideoJob } from '@thumbnailer/contracts';
+import {
+  parseScanCommand,
+  parseVideoJob,
+  SCAN_COMMAND,
+  type ThumbnailResult,
+  type VideoJob,
+} from '@thumbnailer/contracts';
 import type { ILogger } from '@thumbnailer/domain';
 import type { KafkaConnection, KafkaUtils, Signals } from '@thumbnailer/core';
 import type { GeneratorConfig } from '../config.schema.js';
@@ -53,10 +59,13 @@ export class VideoJobConsumer {
     if (this.running) return;
     const consumer = this.kafka.consumer!;
 
+    // Two topics on one consumer: video-jobs (work) and scan-commands (control,
+    // for Pause/Resume). Only the video-jobs topic is ever paused.
     await consumer.subscribe({
       topic: this.config.topic,
       fromBeginning: this.config.fromBeginning,
     });
+    await consumer.subscribe({ topic: this.config.commandsTopic, fromBeginning: false });
 
     // Register graceful teardown: stop the consumer on SIGINT/SIGTERM, in the
     // central ordered registry (core's signals provider).
@@ -68,6 +77,7 @@ export class VideoJobConsumer {
     this.logger.info(
       {
         topic: this.config.topic,
+        commandsTopic: this.config.commandsTopic,
         groupId: this.config.kafka.consumer.groupId,
         outputRoot: this.config.outputRoot,
       },
@@ -77,6 +87,12 @@ export class VideoJobConsumer {
     await consumer.run({
       autoCommit: false,
       eachMessage: async ({ topic, partition, message }) => {
+        // Control commands (Pause/Resume) arrive on the commands topic.
+        if (topic === this.config.commandsTopic) {
+          this.handleCommand(message);
+          return; // commands auto-commit (control signals, not work)
+        }
+
         const offset = message.offset;
         this.kafkaUtils.trackOffset(this.pendingOffsets, topic, partition, offset);
 
@@ -112,6 +128,7 @@ export class VideoJobConsumer {
     const result = await this.generator.generate(job);
 
     const record: ThumbnailResult = {
+      ...(job.scanId ? { scanId: job.scanId } : {}),
       videoPath: job.path,
       outputPath: result.outputPath,
       size: job.size,
@@ -129,6 +146,26 @@ export class VideoJobConsumer {
         { path: job.path, ...ctx, reason: result.reason },
         'job failed after retries — committing to avoid a redelivery loop',
       );
+    }
+  }
+
+  /**
+   * Handle a control command on the commands topic. PauseGenerator pauses
+   * fetching from the video-jobs topic (the process stays alive and keeps
+   * consuming commands); ResumeGenerator unpauses it. Other command types
+   * (StartScan/StopScan) are for the scanner — ignored here.
+   */
+  private handleCommand(message: { value: Buffer | null }): void {
+    const command = parseScanCommand(this.kafkaUtils.parseJson(message as never));
+    if (!command) return;
+
+    const consumer = this.kafka.consumer!;
+    if (command.type === SCAN_COMMAND.PauseGenerator) {
+      consumer.pause([{ topic: this.config.topic }]);
+      this.logger.info('⏸️  generator paused (video-jobs)');
+    } else if (command.type === SCAN_COMMAND.ResumeGenerator) {
+      consumer.resume([{ topic: this.config.topic }]);
+      this.logger.info('▶️  generator resumed (video-jobs)');
     }
   }
 }

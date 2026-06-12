@@ -7,6 +7,8 @@ import { z } from 'zod';
  * lives in contracts (the "table schema").
  */
 export const ThumbnailResultSchema = z.object({
+  /** The scan this result belongs to (if the job carried one). */
+  scanId: z.string().min(1).optional(),
   /** Source video path. */
   videoPath: z.string().min(1),
   /** Where the thumbnail was (or would be) written. */

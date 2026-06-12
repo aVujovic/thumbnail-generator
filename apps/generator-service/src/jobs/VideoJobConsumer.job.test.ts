@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { FakeLogger } from '@thumbnailer/domain/fakes';
-import { serializeVideoJob, type ThumbnailResult, type VideoJob } from '@thumbnailer/contracts';
+import {
+  serializeScanCommand,
+  serializeVideoJob,
+  type ThumbnailResult,
+  type VideoJob,
+} from '@thumbnailer/contracts';
 import { KafkaUtils, type KafkaConnection, type Signals } from '@thumbnailer/core';
 import type { EachMessagePayload } from 'kafkajs';
 import { VideoJobConsumer } from './VideoJobConsumer.job.js';
@@ -18,12 +23,16 @@ async function harness(generateResult: GenerateResult | Error) {
   const commitOffsets = vi.fn().mockResolvedValue(undefined);
   let handler!: (p: EachMessagePayload) => Promise<void>;
 
+  const pause = vi.fn();
+  const resume = vi.fn();
   const consumer = {
     subscribe: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     run: vi.fn(async (opts: { eachMessage: (p: EachMessagePayload) => Promise<void> }) => {
       handler = opts.eachMessage;
     }),
+    pause,
+    resume,
     commitOffsets,
   };
 
@@ -48,6 +57,7 @@ async function harness(generateResult: GenerateResult | Error) {
       logger,
       config: {
         topic: 'video-jobs',
+        commandsTopic: 'scan-commands',
         outputRoot: '/out',
         thumbnailFormat: 'jpg',
         kafka: { consumer: { groupId: 'g' } },
@@ -62,7 +72,7 @@ async function harness(generateResult: GenerateResult | Error) {
   );
 
   await consumerJob.start();
-  return { handler, commitOffsets, generator, logger, signals, saved };
+  return { handler, commitOffsets, generator, logger, signals, saved, pause, resume };
 }
 
 function payload(value: Buffer | null, offset = '5'): EachMessagePayload {
@@ -70,6 +80,14 @@ function payload(value: Buffer | null, offset = '5'): EachMessagePayload {
     topic: 'video-jobs',
     partition: 0,
     message: { value, offset },
+  } as unknown as EachMessagePayload;
+}
+
+function commandPayload(value: Buffer): EachMessagePayload {
+  return {
+    topic: 'scan-commands',
+    partition: 0,
+    message: { value, offset: '0' },
   } as unknown as EachMessagePayload;
 }
 
@@ -197,5 +215,58 @@ describe('VideoJobConsumer result recording', () => {
     const { handler, saved } = await harness({ status: 'generated', outputPath: '/x', attempts: 1 });
     await handler(payload(Buffer.from('not json')));
     expect(saved).toHaveLength(0);
+  });
+
+  it('carries scanId from the job onto the result', async () => {
+    const { handler, saved } = await harness({
+      status: 'generated',
+      outputPath: '/out/x.jpg',
+      attempts: 1,
+    });
+    await handler(payload(serializeVideoJob({ ...job, scanId: 'scan-9' })));
+    expect(saved[0]).toMatchObject({ scanId: 'scan-9' });
+  });
+});
+
+describe('VideoJobConsumer pause/resume', () => {
+  it('pauses video-jobs on PauseGenerator and does not touch the generator', async () => {
+    const { handler, pause, resume, generator } = await harness({
+      status: 'generated',
+      outputPath: '/x',
+      attempts: 1,
+    });
+
+    await handler(commandPayload(serializeScanCommand({ type: 'PauseGenerator' })));
+
+    expect(pause).toHaveBeenCalledWith([{ topic: 'video-jobs' }]);
+    expect(resume).not.toHaveBeenCalled();
+    expect(generator.generate).not.toHaveBeenCalled(); // a command is not a job
+  });
+
+  it('resumes video-jobs on ResumeGenerator', async () => {
+    const { handler, pause, resume } = await harness({
+      status: 'generated',
+      outputPath: '/x',
+      attempts: 1,
+    });
+
+    await handler(commandPayload(serializeScanCommand({ type: 'ResumeGenerator' })));
+
+    expect(resume).toHaveBeenCalledWith([{ topic: 'video-jobs' }]);
+    expect(pause).not.toHaveBeenCalled();
+  });
+
+  it('ignores scanner-only commands (StartScan/StopScan)', async () => {
+    const { handler, pause, resume } = await harness({
+      status: 'generated',
+      outputPath: '/x',
+      attempts: 1,
+    });
+
+    await handler(commandPayload(serializeScanCommand({ type: 'StopScan' })));
+    await handler(commandPayload(serializeScanCommand({ type: 'StartScan', scanId: 'a', scanRoot: '/r' })));
+
+    expect(pause).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
   });
 });

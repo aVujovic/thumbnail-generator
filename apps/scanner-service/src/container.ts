@@ -4,8 +4,10 @@ import type { IFileSystem } from '@thumbnailer/domain';
 import type { ScannerConfig } from './config.schema.js';
 import type { FileScanner } from './scanner/FileScanner.js';
 import type { VideoDetector } from './scanner/videoDetector.js';
+import type { ScanManager } from './scanner/ScanManager.js';
 import type { JobProducer } from './producer/JobProducer.js';
-import type ScanJob from './jobs/ScanJob.job.js';
+import type { EventProducer } from './producer/EventProducer.js';
+import type CommandConsumer from './jobs/CommandConsumer.job.js';
 
 /** Full DI cradle for scanner-service: core infra + this service's classes. */
 export interface ScannerCradle extends CoreCradle {
@@ -14,7 +16,9 @@ export interface ScannerCradle extends CoreCradle {
   videoDetector: VideoDetector;
   fileScanner: FileScanner;
   jobProducer: JobProducer;
-  scanJob: ScanJob;
+  eventProducer: EventProducer;
+  scanManager: ScanManager;
+  commandConsumer: CommandConsumer;
 }
 
 /** Composition root for scanner-service. Populated in service.ts. */

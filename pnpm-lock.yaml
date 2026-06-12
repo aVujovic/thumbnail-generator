@@ -49,6 +49,37 @@ importers:
         specifier: ^4.0.0
         version: 4.1.8(@types/node@20.19.43)(vite@8.0.16(@types/node@20.19.43)(esbuild@0.28.0)(tsx@4.22.4))
 
+  apps/orchestrator-service:
+    dependencies:
+      '@thumbnailer/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@thumbnailer/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@thumbnailer/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      awilix:
+        specifier: ^12.0.5
+        version: 12.1.1
+      kafkajs:
+        specifier: ^2.2.4
+        version: 2.2.4
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      tsx:
+        specifier: ^4.19.0
+        version: 4.22.4
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.0
+        version: 4.1.8(@types/node@20.19.43)(vite@8.0.16(@types/node@20.19.43)(esbuild@0.28.0)(tsx@4.22.4))
+
   apps/scanner-service:
     dependencies:
       '@thumbnailer/contracts':

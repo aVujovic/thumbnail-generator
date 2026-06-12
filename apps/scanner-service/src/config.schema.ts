@@ -9,6 +9,11 @@ export const ConfigSchema = z
   .object({
     KAFKA_BROKERS: z.string().min(1),
     TOPIC_VIDEO_JOBS: z.string().min(1).default('video-jobs'),
+    TOPIC_SCAN_COMMANDS: z.string().min(1).default('scan-commands'),
+    TOPIC_SCAN_EVENTS: z.string().min(1).default('scan-events'),
+    SCANNER_GROUP_ID: z.string().min(1).default('scanners'),
+    // Fallback scan root — used only if a StartScan command omits one is not
+    // expected; the orchestrator supplies scanRoot per scan.
     SCAN_ROOT: z.string().min(1).default('/data'),
     SCAN_MAX_DEPTH: z.coerce.number().int().positive().default(64),
     // Emit an info-level progress line every N entries scanned (0 = off).
@@ -33,10 +38,14 @@ export const ConfigSchema = z
       .map((e) => e.trim().toLowerCase().replace(/^\./, ''))
       .filter(Boolean),
     topic: env.TOPIC_VIDEO_JOBS,
+    commandsTopic: env.TOPIC_SCAN_COMMANDS,
+    eventsTopic: env.TOPIC_SCAN_EVENTS,
     kafka: {
       brokers: env.KAFKA_BROKERS.split(',').map((b) => b.trim()),
       clientId: env.KAFKA_CLIENT_ID,
-      mode: 'producer' as const,
+      // Daemon: consumes commands, produces video-jobs + scan-events.
+      mode: 'both' as const,
+      consumer: { groupId: env.SCANNER_GROUP_ID },
     },
   }));
 

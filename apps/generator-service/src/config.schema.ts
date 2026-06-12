@@ -8,11 +8,12 @@ import { booleanish, resolvePath } from '@thumbnailer/core';
 export const ConfigSchema = z
   .object({
     KAFKA_BROKERS: z.string().min(1),
-    KAFKA_GROUP_ID: z.string().min(1).default('thumbnail-generators'),
+    GENERATOR_GROUP_ID: z.string().min(1).default('thumbnail-generators'),
     KAFKA_CLIENT_ID: z.string().min(1).default('generator-service'),
     KAFKA_SESSION_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
     KAFKA_FROM_BEGINNING: booleanish.default('true'),
     TOPIC_VIDEO_JOBS: z.string().min(1).default('video-jobs'),
+    TOPIC_SCAN_COMMANDS: z.string().min(1).default('scan-commands'),
 
     OUTPUT_ROOT: z.string().min(1).default('./output'),
     THUMBNAIL_FORMAT: z.string().min(1).default('jpg'),
@@ -45,6 +46,7 @@ export const ConfigSchema = z
     logPretty: env.LOG_PRETTY,
     shutdownGraceMs: env.SHUTDOWN_GRACE_MS,
     topic: env.TOPIC_VIDEO_JOBS,
+    commandsTopic: env.TOPIC_SCAN_COMMANDS,
     fromBeginning: env.KAFKA_FROM_BEGINNING,
 
     // thumbnail output
@@ -72,7 +74,7 @@ export const ConfigSchema = z
       clientId: env.KAFKA_CLIENT_ID,
       mode: 'consumer' as const,
       consumer: {
-        groupId: env.KAFKA_GROUP_ID,
+        groupId: env.GENERATOR_GROUP_ID,
         ...(env.KAFKA_SESSION_TIMEOUT_MS !== undefined
           ? { sessionTimeoutMs: env.KAFKA_SESSION_TIMEOUT_MS }
           : {}),

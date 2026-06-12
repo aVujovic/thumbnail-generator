@@ -6,13 +6,15 @@ import { ConfigSchema } from './config.schema.js';
 import LocalFileSystem from './fs/LocalFileSystem.js';
 import VideoDetector from './scanner/videoDetector.js';
 import FileScanner from './scanner/FileScanner.js';
+import ScanManager from './scanner/ScanManager.js';
 import JobProducer from './producer/JobProducer.js';
-import ScanJob from './jobs/ScanJob.job.js';
+import EventProducer from './producer/EventProducer.js';
+import CommandConsumer from './jobs/CommandConsumer.job.js';
 
 /**
- * Entry point / composition root. No business logic lives here — it wires the
- * infrastructure (core) and the service's own classes into the container, then
- * hands control to them. Mirrors the @gamerstake/payment service.ts shape.
+ * Entry point / composition root. The scanner is now a long-lived daemon: it
+ * consumes scan-commands and drives the ScanManager, producing video-jobs and
+ * scan-events. No business logic here — only wiring + start.
  */
 const main = async (): Promise<void> => {
   createService({ container, configSchema: ConfigSchema });
@@ -24,17 +26,14 @@ const main = async (): Promise<void> => {
     videoDetector: asClass(VideoDetector).singleton(),
     fileScanner: asClass(FileScanner).singleton(),
     jobProducer: asClass(JobProducer).singleton(),
-    scanJob: asClass(ScanJob).singleton(),
+    eventProducer: asClass(EventProducer).singleton(),
+    scanManager: asClass(ScanManager).singleton(),
+    commandConsumer: asClass(CommandConsumer).singleton(),
   });
 
-  // Resolving the cradle constructs scanJob, which registers its cancellation
-  // teardown. This happens before commands.start() registers the producer
-  // disconnect — so on shutdown the ordered registry flips scanJob's stop flag
-  // first, halting the walk before the producer is torn down.
-  const { commands, scanJob } = container.cradle;
-  await commands.start(); // connect producer + register Kafka teardown
-  await scanJob.run(); // walk → detect → produce
-  await commands.stop(0); // one-shot: flush + graceful shutdown via signals
+  const { commands, commandConsumer } = container.cradle;
+  await commands.start(); // connect producer + consumer, register teardown
+  await commandConsumer.start(); // subscribe to scan-commands + run (daemon)
 };
 
 void main();

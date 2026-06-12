@@ -35,8 +35,13 @@ export class JobProducer {
     this.now = now;
   }
 
-  async produce(path: string, info: FileInfo): Promise<void> {
-    const job: VideoJob = { path, size: info.size, discoveredAt: this.now() };
+  async produce(path: string, info: FileInfo, scanId?: string): Promise<void> {
+    const job: VideoJob = {
+      path,
+      size: info.size,
+      discoveredAt: this.now(),
+      ...(scanId ? { scanId } : {}),
+    };
     await this.kafka.producer!.send({
       topic: this.config.topic,
       messages: [{ key: job.path, value: serializeVideoJob(job) }],
