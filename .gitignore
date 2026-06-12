@@ -8,3 +8,4 @@ dist/
 apps/generator-service/output
 /videoDb.jsonl
 PLAN.md
+.claude
