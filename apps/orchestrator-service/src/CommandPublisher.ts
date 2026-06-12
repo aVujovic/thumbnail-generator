@@ -27,8 +27,18 @@ export class CommandPublisher {
   }
 
   async publish(command: ScanCommand): Promise<void> {
-    // Key by scanId when present so a scan's commands keep partition order.
-    const key = 'scanId' in command && command.scanId ? command.scanId : command.type;
+    // Partition key, in priority order:
+    //   tenantId  → routes a tenant's StartScan/StopScan to the SAME partition,
+    //               i.e. the one scanner instance that owns that tenant (this is
+    //               how scanners shard work across partitions, like the generator).
+    //   scanId    → fallback to keep a scan's commands partition-ordered.
+    //   type      → generator commands (Pause/Resume) have neither; key by type.
+    const key =
+      'tenantId' in command && command.tenantId
+        ? command.tenantId
+        : 'scanId' in command && command.scanId
+          ? command.scanId
+          : command.type;
     await this.kafka.producer!.send({
       topic: this.config.commandsTopic,
       messages: [{ key, value: serializeScanCommand(command) }],

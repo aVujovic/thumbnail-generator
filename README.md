@@ -228,6 +228,7 @@ pnpm scan:start --tenant tenant-1          # scan tenant-1's directory
 pnpm scan:start --tenant tenant-1 --id s-1 # explicit scanId for correlation
 pnpm scan:stop                             # cancel the running scan + clear the queue
 pnpm scan:stop --id s-1                    # cancel/drop a specific scan
+pnpm scan:stop --tenant tenant-1           # route the stop to tenant-1's owning scanner (scanner pools)
 pnpm gen:pause                             # pause thumbnail generation (jobs queue up)
 pnpm gen:resume                            # resume generation
 ```
@@ -349,7 +350,7 @@ that difference is the interesting part:
 |---|---|---|---|
 | **generator** | consumer group on `video-jobs` | partition (one generator per partition) | run N instances; N ≤ `video-jobs` partitions (above) |
 | **sync** | consumer group on `thumbnail-ready` | partition (one syncer per partition) | identical to the generator — run N instances; N ≤ `thumbnail-ready` partitions |
-| **scanner** | tenant / scan-root sharding | a scan (one walk at a time per instance) | partition `scan-commands` by `tenantId`, or shard tenants across scanner pools |
+| **scanner** | consumer group on `scan-commands`, keyed by `tenantId` | a tenant (one walk at a time per owning instance) | run N instances; N ≤ `scan-commands` partitions — the broker assigns each scanner a subset of tenants |
 | **orchestrator** | — (stateless) | — | nothing to scale: it publishes one command and exits |
 
 **Generator and sync are the easy case.** Both are plain consumer-group members on a partitioned
@@ -366,22 +367,46 @@ Because `ThumbnailReady` is keyed by `videoPath` (same shard key as the job), a 
 generate-then-sync work lands on a consistent partition end to end, and re-syncing is idempotent — so
 sync can scale and recover with the same guarantees as the generator.
 
-**The scanner is the different case** — worth calling out because it shows scaling isn't one-size-fits.
-A scan is a single directory walk; one walk doesn't split across partitions the way a stream of
-independent jobs does. So you don't scale the scanner by throwing more consumers at one scan — you
-scale it by **distributing tenants / scan-roots across instances**. Two ways:
+**The scanner is the interesting case** — worth calling out because it shows scaling isn't
+one-size-fits. A scan is a single directory walk; one walk doesn't split across partitions the way a
+stream of independent jobs does. So you don't scale the scanner by throwing more consumers at *one*
+scan — you scale it by **distributing tenants across instances**, and the broker does that for you.
 
-- **Partition `scan-commands` by `tenantId`.** Each scanner in the group owns a subset of tenants, so
-  `tenant-1`'s scan and `tenant-2`'s scan run on different instances concurrently. (The orchestrator
-  already carries `tenantId` on every command — it would just become the message key.)
-- **Separate scanner pools per tenant tier.** A heavy tenant (millions of files) gets its own scanner
-  deployment with its own `SCANNER_GROUP_ID`, isolated from smaller tenants — so one giant scan never
-  starves everyone else. The tenant catalog (`tenants.json` → a DB table in production) is what assigns
-  roots to pools.
+This is **implemented**: the orchestrator keys every `scan-commands` message by `tenantId`
+(`CommandPublisher`), and all scanners share one consumer group (`SCANNER_GROUP_ID=scanners`). So when
+`scan-commands` has N partitions, the broker assigns each scanner a subset of partitions → a subset of
+tenants. `StartScan tenant-1` lands on whichever scanner owns `tenant-1`'s partition; `tenant-2` may
+land on a different one — the two tenants scan **concurrently**, on different instances, with zero
+duplication (the broker guarantees exactly one owner per partition) and automatic failover (a dead
+scanner's tenants get reassigned to the survivors). To scale it out:
 
-The throughput *within* a single scan is already bounded by disk, not CPU — so the scanner's scaling
-axis is **breadth** (more tenants in parallel), while the generator/sync axis is **depth** (more
-workers on one stream). The broker makes both work without any service knowing about the others.
+```bash
+# give scan-commands N partitions, then run N scanners (one consumer group)
+docker exec thumbnailer-redpanda rpk topic create scan-commands -p 4 -X brokers=localhost:9092
+pnpm scan   # in N terminals / N replicas
+```
+
+`StopScan` is keyed by `tenantId` too (`pnpm scan:stop --tenant tenant-1`), so a stop lands on the
+**same** scanner that owns — and is running — that tenant's scan. (Without `--tenant`, stop keys by
+`scanId`/type and may reach a different instance — fine for the single-scanner default, but use
+`--tenant` when running a scanner pool.)
+
+Why partitioning over a "broadcast + local `OWNED_TENANTS` filter" config: the broker gives you
+exactly-one-owner, no-gaps, and failover **for free** — the same machinery the generator and sync
+already use — so all three services scale identically and no service hand-maintains a tenant→instance
+map. (If you ever need to *pin* a specific tenant to specific hardware — e.g. its data is on one mount
+— a dedicated scanner pool with its own `SCANNER_GROUP_ID` is the escape hatch; the catalog assigns
+roots to pools.)
+
+> **Caveat — `PauseGenerator`/`ResumeGenerator` reach one generator, not all.** They flow on
+> `scan-commands` keyed by command `type`, so with several generators in one group only the partition
+> owner receives them. That's consumer-group semantics, not a regression from this change. If you need
+> pause/resume to fan out to *every* generator, give each generator instance a unique group id (turning
+> that topic into pub/sub for them) — a separate concern from scanner sharding.
+
+The throughput *within* a single scan is bounded by disk, not CPU — so the scanner's scaling axis is
+**breadth** (more tenants in parallel), while the generator/sync axis is **depth** (more workers on one
+stream). The broker makes both work without any service knowing about the others.
 
 > **In production (Kubernetes):** generator and sync are `Deployment`s with HPAs on consumer lag;
 > the scanner is a `Deployment` (or a `StatefulSet` / `Job` per tenant tier) sized to the number of
@@ -406,7 +431,7 @@ pnpm dev             # all daemons in watch mode (development only)
 
 # orchestration (control the running daemons)
 pnpm scan:start --tenant <id> [--id <id>]   # StartScan (path from tenants.json)
-pnpm scan:stop [--id <id>]                  # StopScan
+pnpm scan:stop [--tenant <id>] [--id <id>]  # StopScan (--tenant routes to the owning scanner)
 pnpm gen:pause                              # PauseGenerator
 pnpm gen:resume                             # ResumeGenerator
 

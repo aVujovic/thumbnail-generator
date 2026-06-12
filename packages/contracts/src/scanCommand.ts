@@ -34,6 +34,12 @@ export const ScanCommandSchema = z.discriminatedUnion('type', [
     type: z.literal(SCAN_COMMAND.StopScan),
     /** Stop a specific scan, or omit to stop whatever is running + clear the queue. */
     scanId: z.string().min(1).optional(),
+    /**
+     * Tenant whose scan to stop. Used as the partition key so the StopScan lands
+     * on the same partition (same scanner instance) as that tenant's StartScan —
+     * essential once scanners are sharded by tenant across partitions.
+     */
+    tenantId: z.string().min(1).optional(),
   }),
   z.object({ type: z.literal(SCAN_COMMAND.PauseGenerator) }),
   z.object({ type: z.literal(SCAN_COMMAND.ResumeGenerator) }),
@@ -53,8 +59,11 @@ export const scanCommands = {
     scanRoot,
     ...(tenantId ? { tenantId } : {}),
   }),
-  stopScan: (scanId?: string): ScanCommand =>
-    scanId ? { type: SCAN_COMMAND.StopScan, scanId } : { type: SCAN_COMMAND.StopScan },
+  stopScan: (scanId?: string, tenantId?: string): ScanCommand => ({
+    type: SCAN_COMMAND.StopScan,
+    ...(scanId ? { scanId } : {}),
+    ...(tenantId ? { tenantId } : {}),
+  }),
   pauseGenerator: (): ScanCommand => ({ type: SCAN_COMMAND.PauseGenerator }),
   resumeGenerator: (): ScanCommand => ({ type: SCAN_COMMAND.ResumeGenerator }),
 } as const;

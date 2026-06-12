@@ -18,7 +18,7 @@ export type ResolveTenant = (tenantId: string) => string;
  *
  * Usage:
  *   start  --tenant <id> [--id <scanId>]   StartScan (path resolved from catalog)
- *   stop   [--id <scanId>]                 StopScan
+ *   stop   [--tenant <id>] [--id <scanId>] StopScan (--tenant routes to the owning scanner)
  *   pause                                  PauseGenerator
  *   resume                                 ResumeGenerator
  */
@@ -38,7 +38,9 @@ export function parseArgs(
       return scanCommands.startScan(scanId, resolveTenant(tenant), tenant);
     }
     case 'stop':
-      return scanCommands.stopScan(flag(rest, 'id'));
+      // --tenant is optional here, and only routes the command to the scanner
+      // that owns the tenant (the partition key); it is NOT resolved to a path.
+      return scanCommands.stopScan(flag(rest, 'id'), flag(rest, 'tenant'));
     case 'pause':
       return scanCommands.pauseGenerator();
     case 'resume':

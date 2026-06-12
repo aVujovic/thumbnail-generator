@@ -40,6 +40,21 @@ describe('parseArgs', () => {
     expect(parseArgs(['stop'], id, resolveTenant)).toEqual({ type: 'StopScan' });
   });
 
+  it('carries --tenant on stop (routing key, not resolved to a path)', () => {
+    resolveTenant.mockClear();
+    expect(parseArgs(['stop', '--tenant', 'tenant-1'], id, resolveTenant)).toEqual({
+      type: 'StopScan',
+      tenantId: 'tenant-1',
+    });
+    expect(parseArgs(['stop', '--id', 'abc', '--tenant', 'tenant-1'], id, resolveTenant)).toEqual({
+      type: 'StopScan',
+      scanId: 'abc',
+      tenantId: 'tenant-1',
+    });
+    // stop must NOT resolve the tenant to a path (unlike start)
+    expect(resolveTenant).not.toHaveBeenCalled();
+  });
+
   it('builds Pause/Resume', () => {
     expect(parseArgs(['pause'], id, resolveTenant)).toEqual({ type: 'PauseGenerator' });
     expect(parseArgs(['resume'], id, resolveTenant)).toEqual({ type: 'ResumeGenerator' });
